@@ -1,24 +1,23 @@
 /*
-	This file is part of cpp-ethereum.
+	This file is part of FISCO-BCOS.
 
-	cpp-ethereum is free software: you can redistribute it and/or modify
+	FISCO-BCOS is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation, either version 3 of the License, or
 	(at your option) any later version.
 
-	cpp-ethereum is distributed in the hope that it will be useful,
+	FISCO-BCOS is distributed in the hope that it will be useful,
 	but WITHOUT ANY WARRANTY; without even the implied warranty of
 	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 	GNU General Public License for more details.
 
 	You should have received a copy of the GNU General Public License
-	along with cpp-ethereum.  If not, see <http://www.gnu.org/licenses/>.
+	along with FISCO-BCOS.  If not, see <http://www.gnu.org/licenses/>.
 */
 /**
  * @file: NodeConnParamsManager.cpp
- * @author: fisco-dev
- * 
- * @date: 2017
+ * @author: toxotguo
+ * @date: 2018
  */
 
 #include <json_spirit/JsonSpiritHeaders.h>
@@ -66,9 +65,7 @@ NodeConnParams::NodeConnParams(const std::string & json)
 
 }
 
-/**
-  读取节点连接配置
-  */
+
 NodeConnParamsManager::NodeConnParamsManager(std::string const& _json)
 {
     //LOG(INFO) << "NodeConnParamsManager json is " << _json ;
@@ -81,7 +78,6 @@ NodeConnParamsManager::NodeConnParamsManager(std::string const& _json)
     js::mObject obj = val.get_obj();
 
 
-    //读取连接的节点信息
     for (auto node : obj["NodeextraInfo"].get_array()) {
         NodeConnParams   nodeConnParam;
 
@@ -100,9 +96,7 @@ NodeConnParamsManager::NodeConnParamsManager(std::string const& _json)
 
     LOG(INFO) << "loadNodeConnParams _mConfNodeConnParams size is : " << _mConfNodeConnParams.size() ;
 
-    //读取共识需要的节点数据
-    //从合约里面取一次 修改共识的节点数据
-    if (_pSysContractApi != nullptr) {
+    if (m_pContractApi != nullptr) {
         callSysContractData(-1);
     }
 
@@ -112,35 +106,17 @@ NodeConnParamsManager::NodeConnParamsManager(std::string const& _json)
 
 bool NodeConnParamsManager::CAVerify = false;
 
-//设置sysEthereumApi  同时设置回调函数
+
 void NodeConnParamsManager::setSysContractApi(std::shared_ptr<SystemContractApi> sysContractApi)
 {
-    //如果为空这设置
-    if (_pSysContractApi == nullptr)
+    if (m_pContractApi == nullptr)
     {
-        _pSysContractApi = sysContractApi;
-
-        //注册回调
-        _pSysContractApi->addCBOn("node", [ = ](string) {
+        m_pContractApi = sysContractApi;
+        m_pContractApi->addCBOn("node", [ = ](string) {
             LOG(INFO) << "receive systemcontract node call";
             //LOG(INFO) << "receive systemcontract node call" ;
             callSysContractData(-1);
         });
-
-        ////CA callback
-        //_pSysContractApi->addCBOn("ca", [ = ](string pub256) {
-        //    LOG(INFO) << "receive systemcontract node call";
-        //    //LOG(INFO) << "receive systemcontract CA callback" ;
-        //    CAInfoModifyCallback(pub256);
-        //});
-
-        ////CA verify callback
-        //_pSysContractApi->addCBOn("config", [ = ](string) {
-        //    LOG(INFO) << "receive systemcontract node call";
-        //    //LOG(INFO) << "receive systemcontract CA callback" ;
-        //    CAVerifyModifyCallback();
-        //});
-
         callSysContractData(-1);
     }
 }
@@ -148,11 +124,10 @@ void NodeConnParamsManager::setSysContractApi(std::shared_ptr<SystemContractApi>
 void NodeConnParamsManager::callSysContractData(int const& blockNum)
 {
     std::vector< NodeConnParams> vNodeParams;
-    //默认获取最高块
-    _pSysContractApi->getAllNode(blockNum, vNodeParams);
+    m_pContractApi->getAllNode(blockNum, vNodeParams);
+
     LOG(INFO) << "call systemcontract get all Nodes  size is " << vNodeParams.size() << ".block is " << blockNum;
-    //LOG(INFO) << "call systemcontract get all Nodes  size is " << vNodeParams.size() << ".block is " << blockNum ;
-    //如果取出数据就使用该数据
+   
     if (vNodeParams.size() > 0 && checkNodesValid(vNodeParams))
     {
 
@@ -160,14 +135,12 @@ void NodeConnParamsManager::callSysContractData(int const& blockNum)
         std::vector< NodeConnParams> vDelNodes;
 
         {
-            //更新内存数据，不存在的节点进行断连，新加节点进行连接
-            //和共识节点数据进行比较 如果有变化则修改共识节点的数据
             Guard l(_xNodeConnParam);
             diffNodes(vNodeParams, vAddNodes, vDelNodes);
 
             LOG(TRACE) << "call systemcontract diff nodes. add nodes size is " << vAddNodes.size() << ".del nodes size is " << vDelNodes.size() ;
-            //设置合约内的节点数据
-            if ( vNodeParams.size() > 0 ) //直接覆盖
+        
+            if ( vNodeParams.size() > 0 ) 
             {
                 _mNodeConnParams.clear();
                 for (auto stNode : vNodeParams)
@@ -180,10 +153,9 @@ void NodeConnParamsManager::callSysContractData(int const& blockNum)
         }
 
         {
-            //判断节点是否在配置文件中 如果节点在配置文件中 则不进行断连 因为配置文件还允许连接
-            //断掉删除的节点
+           
             std::map<std::string, NodeConnParams> mNodeConnParams;
-            NodeConnParamsManagerApi::getAllConfNodeConnInfo(mNodeConnParams);
+            getAllConfNodeConnInfo(mNodeConnParams);
             for (auto stDelNode : vDelNodes)
             {
                 if (mNodeConnParams.find(stDelNode._sNodeId) == mNodeConnParams.end())
@@ -192,8 +164,7 @@ void NodeConnParamsManager::callSysContractData(int const& blockNum)
                 }
             }
 
-            //判断节点是否在配置文件中 如果节点在配置文件中 则不进行新的连接 因为已经有连接呢
-            //连接新节点
+            
             for (auto stAddNode : vAddNodes)
             {
                 if (mNodeConnParams.find(stAddNode._sNodeId) == mNodeConnParams.end())
@@ -205,14 +176,6 @@ void NodeConnParamsManager::callSysContractData(int const& blockNum)
     }
 }
 
-//检查节点是否连续
-/*
-   检查条件
-   1、idx从0开始
-   2、idx是连续的
-   3、前面是记账者节点，后面是非记账节点
-   ps ： 数据出来时保证 idx是递增的，例如1.5.9
-   */
 bool NodeConnParamsManager::checkNodesValid(const std::vector< NodeConnParams> &vNodes)
 {
     bool rRet = false;
@@ -221,7 +184,7 @@ bool NodeConnParamsManager::checkNodesValid(const std::vector< NodeConnParams> &
         return rRet;
     }
 
-    //从0开始
+   
     int i = 0;
     bool bContinuous = true;
     dev::u256 iMaxSignNodeIdx = -1;
@@ -236,7 +199,7 @@ bool NodeConnParamsManager::checkNodesValid(const std::vector< NodeConnParams> &
         }
         i++;
 
-        //用枚举
+       
         if (node._iIdentityType == AccountType::EN_ACCOUNT_TYPE_MINER)
         {
             iMaxSignNodeIdx = node._iIdx;
@@ -260,7 +223,6 @@ bool NodeConnParamsManager::checkNodesValid(const std::vector< NodeConnParams> &
 }
 
 
-//不支持修改数据， 即不支持重复数据
 bool NodeConnParamsManager::diffNodes(const std::vector< NodeConnParams> &vNodeParams, std::vector< NodeConnParams> &vAddNodes, std::vector< NodeConnParams> &vDelNodes)
 {
     if (vNodeParams.size() == 0)
@@ -269,7 +231,7 @@ bool NodeConnParamsManager::diffNodes(const std::vector< NodeConnParams> &vNodeP
     }
 
     std::map<std::string, NodeConnParams> mTmpNode;
-    //找到新节点
+    
     for (auto stNewNode : vNodeParams)
     {
         if (_mNodeConnParams.find(stNewNode._sNodeId) == _mNodeConnParams.end())
@@ -279,7 +241,7 @@ bool NodeConnParamsManager::diffNodes(const std::vector< NodeConnParams> &vNodeP
         mTmpNode[stNewNode._sNodeId] = stNewNode;
     }
 
-    //找到不存在的节点
+    
     for (auto stOldNode : _mNodeConnParams)
     {
         if (mTmpNode.find(stOldNode.first) == mTmpNode.end())
@@ -295,19 +257,19 @@ std::pair<bool, std::map<std::string, NodeConnParams> > NodeConnParamsManager::g
 {
     std::map<std::string, NodeConnParams> temp;
 
-    if ( _chainParams.godMinerStart > 0 ) //开启了上帝模式
+    if ( m_chainParams.godMinerStart > 0 )
     {
         u256 lastBlockNumber = blockNum;
         if (blockNum < 0)
         {
-            lastBlockNumber = _pSysContractApi->getBlockChainNumber();
+            lastBlockNumber = m_pContractApi->getBlockChainNumber();
         }
 
-        if ( ( lastBlockNumber >= (_chainParams.godMinerStart - 1)  ) && ( lastBlockNumber < _chainParams.godMinerEnd) )
+        if ( ( lastBlockNumber >= (m_chainParams.godMinerStart - 1)  ) && ( lastBlockNumber < m_chainParams.godMinerEnd) )
         {
             LOG(INFO) << " getAllNodeConnInfo lastBlockNumber=" << lastBlockNumber << ",blockNum=" << blockNum << " Hit GodMiner ";
 
-            temp = _chainParams.godMinerList;
+            temp = m_chainParams.godMinerList;
             return std::make_pair(true, temp);
         }
         else
@@ -319,10 +281,9 @@ std::pair<bool, std::map<std::string, NodeConnParams> > NodeConnParamsManager::g
     return std::make_pair(false, temp);
 }
 
-//获取所有的参与共识节点的数据
 void NodeConnParamsManager::getAllNodeConnInfo(int blockNum, std::map<std::string, NodeConnParams> & mNodeConnParams) const
 {
-    LOG(TRACE) << "NodeConnParamsManager::getAllNodeConnInfo=" << blockNum;
+    LOG(TRACE) << "NodeConnParamsManager::getAllNodeConnInfo blockNum=" << blockNum;
 
     std::pair<bool, std::map<std::string, NodeConnParams> > checkGodMiner = getGodMiner(blockNum);
     if ( checkGodMiner.first == true )
@@ -332,14 +293,12 @@ void NodeConnParamsManager::getAllNodeConnInfo(int blockNum, std::map<std::strin
     }
 
     if (blockNum < 0) {
-        NodeConnParamsManagerApi::getAllNodeConnInfoContract(mNodeConnParams);
+        getAllNodeConnInfoContract(mNodeConnParams);
     }
     else {
         std::vector<NodeConnParams> vNodeParams;
-        //默认获取最高块
-        //创世块中一定有数据 不考虑为空的情况
-        _pSysContractApi->getAllNode(blockNum, vNodeParams);
-        LOG(TRACE) << "_pSysContractApi->getAllNode= " << vNodeParams.size();
+        m_pContractApi->getAllNode(blockNum, vNodeParams);
+        LOG(TRACE) << "m_pContractApi->getAllNode= " << vNodeParams.size();
 
         if (vNodeParams.size() > 0)
         {
@@ -351,19 +310,18 @@ void NodeConnParamsManager::getAllNodeConnInfo(int blockNum, std::map<std::strin
         else
         {
             int idx = 0;
-            for (auto nodeid : _vInitIdentityNodes)
+            for (auto nodeid : m_initnodes)
             {
                 NodeConnParams node;
                 node._sNodeId = nodeid;
                 node._iIdx = idx++;
-                node._iIdentityType = 1; // 默认这里的都是记账节点
+                node._iIdentityType = 1; 
                 mNodeConnParams[nodeid] = node;
             }
         }
     }
 }
 
-//增加新的节点配置
 bool NodeConnParamsManager::addNewNodeConnInfo(const std::string &_json)
 {
     bool bRet = false;
@@ -403,7 +361,7 @@ bool NodeConnParamsManager::addNewNodeConnInfo(const std::string &_json)
     return bRet;
 }
 
-//增加新的节点配置
+
 bool NodeConnParamsManager::addNewNodeConnInfo(const NodeConnParams &nodeParam)
 {
     Guard l(_xConfigNodeConnParam);
@@ -417,24 +375,21 @@ bool NodeConnParamsManager::addNewNodeConnInfo(const NodeConnParams &nodeParam)
     return true;
 }
 
-//发送配置同步请求
 void NodeConnParamsManager::sendNodeInfoSync(const std::vector<NodeConnParams> &vParams)
 {
-    if (vParams.size() == 0 || _pHost == nullptr)
+    if (vParams.size() == 0 || m_phost == nullptr)
     {
         return;
     }
     LOG(INFO) << "sendNodeInfoSync  " << vParams.size() ;
-    //增加节点配置
-    _pHost->addNodeConnParam(vParams);
+    m_phost->addNodeConnParam(vParams);
 }
 
-//进行节点连接
 void NodeConnParamsManager::connNode(const NodeConnParams &param)
 {
     LOG(TRACE) << "NodeConnParamsManager::connNode" << param.toEnodeInfo() << " Valid=" << param.Valid();
 
-    if (_pNetwork == nullptr || !param.Valid())
+    if (m_pnetwork == nullptr || !param.Valid())
     {
         LOG(TRACE) << "NodeConnParamsManager::connNode Not Valid!";
         return;
@@ -442,7 +397,7 @@ void NodeConnParamsManager::connNode(const NodeConnParams &param)
 
     try {
         LOG(TRACE) << "NodeConnParamsManager::connNode start" << param.toEnodeInfo() << " Valid=" << param.Valid();
-        _pNetwork->addPeer(p2p::NodeSpec(param.toEnodeInfo()), p2p::PeerType::Required);
+        m_pnetwork->addPeer(p2p::NodeSpec(param.toEnodeInfo()), p2p::PeerType::Required);
     }
     catch (...)
     {
@@ -450,18 +405,16 @@ void NodeConnParamsManager::connNode(const NodeConnParams &param)
     }
 }
 
-//发送删除节点连接信息
 void NodeConnParamsManager::sendDelNodeInfoSync(const std::string &sNodeId)
 {
-    if (sNodeId == "" || _pHost == nullptr)
+    if (sNodeId == "" || m_phost == nullptr)
     {
         return;
     }
 
-    _pHost->delNodeConnParam(sNodeId);
+    m_phost->delNodeConnParam(sNodeId);
 }
 
-//删除节点信息 删除config.json中的数据 并落地
 void NodeConnParamsManager::delNodeConnInfo(const std::string &sNodeId, bool &bExisted)
 {
     bExisted = false;
@@ -481,7 +434,7 @@ void NodeConnParamsManager::delNodeConnInfo(const std::string &sNodeId, bool &bE
     }
 }
 
-//写节点文件
+
 void NodeConnParamsManager::writeNodeFile()
 {
     Json::Value resConn;
@@ -510,17 +463,16 @@ void NodeConnParamsManager::writeNodeFile()
 
 }
 
-//断掉连接
 void NodeConnParamsManager::disconnNode(const std::string & sNodeId)
 {
-    if (_pNetwork == nullptr || sNodeId == "")
+    if (m_pnetwork == nullptr || sNodeId == "")
     {
         return;
     }
 
     LOG(INFO) << "disconnNode node id is " << sNodeId ;
     try {
-        _pNetwork->disconnectByNodeId(sNodeId);
+        m_pnetwork->disconnectByNodeId(sNodeId);
     }
     catch (...)
     {
@@ -528,10 +480,9 @@ void NodeConnParamsManager::disconnNode(const std::string & sNodeId)
     }
 }
 
-//-------------------------共识需要下面的接口（数据全部从共识中取） start--------------------------------------//
 bool NodeConnParamsManager::getPublicKey(u256 const& _idx, Public & _pub) const {
     std::pair<bool, std::map<std::string, NodeConnParams> > checkGodMiner = getGodMiner(-1);
-    if ( checkGodMiner.first == true ) //上帝模式
+    if ( checkGodMiner.first == true ) 
     {
         for (auto iter = checkGodMiner.second.begin(); iter != checkGodMiner.second.end(); ++iter) {
             if (iter->second._iIdx == _idx) {
@@ -557,7 +508,7 @@ bool NodeConnParamsManager::getPublicKey(u256 const& _idx, Public & _pub) const 
 
 bool NodeConnParamsManager::getIdx(p2p::NodeID const& _nodeId, u256 &_idx) const {
     std::pair<bool, std::map<std::string, NodeConnParams> > checkGodMiner = getGodMiner(-1);
-    if ( checkGodMiner.first == true ) //上帝模式
+    if ( checkGodMiner.first == true ) 
     {
         auto iter = checkGodMiner.second.find(_nodeId.hex());
         if (iter != checkGodMiner.second.end()) {
@@ -581,7 +532,7 @@ bool NodeConnParamsManager::getIdx(p2p::NodeID const& _nodeId, u256 &_idx) const
 
 unsigned NodeConnParamsManager::getMinerNum() const {
     std::pair<bool, std::map<std::string, NodeConnParams> > checkGodMiner = getGodMiner(-1);
-    if ( checkGodMiner.first == true ) //上帝模式
+    if ( checkGodMiner.first == true ) 
     {
         unsigned count = 0;
         for (auto iter = checkGodMiner.second.begin(); iter != checkGodMiner.second.end(); ++iter) {
@@ -607,7 +558,7 @@ unsigned NodeConnParamsManager::getMinerNum() const {
 
 bool NodeConnParamsManager::getAccountType(p2p::NodeID const& _nodeId, unsigned & _type) const {
     std::pair<bool, std::map<std::string, NodeConnParams> > checkGodMiner = getGodMiner(-1);
-    if ( checkGodMiner.first == true ) //上帝模式
+    if ( checkGodMiner.first == true )
     {
         std::string _nodeIdStr = _nodeId.hex();
         auto iter = checkGodMiner.second.find(_nodeId.hex());
@@ -632,7 +583,7 @@ bool NodeConnParamsManager::getAccountType(p2p::NodeID const& _nodeId, unsigned 
 
 unsigned NodeConnParamsManager::getNodeNum() const {
     std::pair<bool, std::map<std::string, NodeConnParams> > checkGodMiner = getGodMiner(-1);
-    if ( checkGodMiner.first == true ) //上帝模式
+    if ( checkGodMiner.first == true )
     {
         return checkGodMiner.second.size();
     }
@@ -643,7 +594,6 @@ unsigned NodeConnParamsManager::getNodeNum() const {
     }
 }
 
-//-------------------------共识需要上面的接口（数据全部从共识中取） end--------------------------------------//
 bool NodeConnParamsManager::nodeInfoHash(h256& h) 
 {
         eth::NodeConnParams stNodeConnParam;
@@ -653,7 +603,7 @@ bool NodeConnParamsManager::nodeInfoHash(h256& h)
             LOG(INFO) << "No NodeConninfo (" << sNodeId << ")." ;
             return false;
         }
-        //crypto Common中进行加密
+       
         RLPStream _rlps;
     _rlps.appendList(3) << stNodeConnParam._sNodeId << stNodeConnParam._sAgencyInfo << stNodeConnParam._sIP;
     // _rlps.appendList(2) << stNodeConnParam._sNodeId << stNodeConnParam._sAgencyInfo;//不使用ip进行数字签名操作
@@ -661,23 +611,10 @@ bool NodeConnParamsManager::nodeInfoHash(h256& h)
     LOG(INFO) << " getSelfNodeInfo hash is " << h.abridged() << "|nodeid is " << stNodeConnParam._sNodeId.substr(0, 6) << "|agenceinfo is " << stNodeConnParam._sAgencyInfo.substr(0, 6) << "|ip is " << stNodeConnParam._sIP ;
     return true;
 }
-//签名验证的数据全部从两边数据中读取
+
 bool NodeConnParamsManager::signNodeInfo(CABaseData & caBaseData)
 {
     try {
-        // eth::NodeConnParams stNodeConnParam;
-        // std::string sNodeId = m_host->id().hex();
-        // if (!getNodeConnInfoBoth(sNodeId, stNodeConnParam))
-        // {
-        //     LOG(INFO) << "No NodeConninfo (" << sNodeId << ")." ;
-        //     return false;
-        // }
-        // //crypto Common中进行加密
-        // RLPStream _rlps;
-        // _rlps.appendList(3) << stNodeConnParam._sNodeId << stNodeConnParam._sAgencyInfo << stNodeConnParam._sIP;
-		// // _rlps.appendList(2) << stNodeConnParam._sNodeId << stNodeConnParam._sAgencyInfo;//不使用ip进行数字签名操作
-        // auto hash = dev::sha3(_rlps.out());
-        // LOG(INFO) << " getSelfSignData hash is " << hash << "|nodeid is " << stNodeConnParam._sNodeId << "|agenceinfo is " << stNodeConnParam._sAgencyInfo << "|ip is " << stNodeConnParam._sIP ;
         h256 hash;
         if (!nodeInfoHash(hash))
             return false;
@@ -732,7 +669,7 @@ bool NodeConnParamsManager::checkNodeInfo(const string& sEndPointNodeId, const h
 {
     bool bRet = false;
     LOG(INFO) << "checkNodeConnInfo nodeid is " << sEndPointNodeId.substr(0, 6) << "| nodeinfo hash is " << h.abridged();
-    //获取对端节点信息（从合约还有配置文件中取）
+    
     NodeConnParams stNodeConnParam;
     if (!getNodeConnInfoBoth(sEndPointNodeId, stNodeConnParam))
     {
@@ -740,13 +677,12 @@ bool NodeConnParamsManager::checkNodeInfo(const string& sEndPointNodeId, const h
         return bRet;
     }
 
-    //对数据进行hash
     RLPStream _rlps;
     _rlps.appendList(3) << stNodeConnParam._sNodeId << stNodeConnParam._sAgencyInfo << stNodeConnParam._sIP;
     auto hash = dev::sha3(_rlps.out());
 
     LOG(INFO) << "checkNodeConnInfo(from local data) hash is " << hash.abridged() << "|" << stNodeConnParam._sNodeId.substr(0, 6) << "|" << stNodeConnParam._sAgencyInfo.substr(0, 6) << "|" << stNodeConnParam._sIP ;    
-    //判断数据是否一致
+    
     if (hash != h)
     {
         LOG(ERROR) << "NodeInfo hash error. (" << sEndPointNodeId.substr(0, 6) << ")'s hash is " << h.abridged() << "." ;
@@ -762,7 +698,7 @@ bool NodeConnParamsManager::checkNodeInfo(const std::string& sEndPointNodeId, CA
     bool bRet = false;
     // std::string sEndPointNodeId = remoteNodeID;
     LOG(INFO) << " checkNodeConnInfo nodeid is " << sEndPointNodeId << "| sign is " << caBaseData.getNodeSign() ;
-    //获取对端节点信息（从合约还有配置文件中取）
+   
     NodeConnParams stNodeConnParam;
     if (!getNodeConnInfoBoth(sEndPointNodeId, stNodeConnParam))
     {
@@ -770,15 +706,14 @@ bool NodeConnParamsManager::checkNodeInfo(const std::string& sEndPointNodeId, CA
         return bRet;
     }
 
-    //对数据进行hash
+   
     RLPStream _rlps;
     _rlps.appendList(3) << stNodeConnParam._sNodeId << stNodeConnParam._sAgencyInfo << stNodeConnParam._sIP;
-	// _rlps.appendList(2) << stNodeConnParam._sNodeId << stNodeConnParam._sAgencyInfo;//只对nodeid等信息进行签名，不对IP信息进行签名
+	
     auto hash = dev::sha3(_rlps.out());
 
     LOG(INFO) << "checkNodeConnInfo hash is " << hash << "|" << stNodeConnParam._sNodeId << "|" << stNodeConnParam._sAgencyInfo << "|" << stNodeConnParam._sIP;
-    //用公钥进行解析
-    //判断数据是否一致
+   
     if (!verify(Public(sEndPointNodeId), caBaseData.getNodeSign(), hash))
     {
         LOG(ERROR) << "Sign error. (" << sEndPointNodeId << ") sSign is " << caBaseData.getNodeSign() << "." ;
@@ -839,7 +774,7 @@ bool NodeConnParamsManager::CheckConnectCert(const std::string& serialNumber, co
     bool caVerify = eth::NodeConnParamsManager::CAVerify;
     if (!caVerify)
     {
-        //没有开启，统一返回true
+        
         LOG(DEBUG) << "CAVerify is false." ;
         return true;
     }
@@ -862,36 +797,6 @@ bool NodeConnParamsManager::CheckConnectCert(const std::string& serialNumber, co
         return false;
     }
 
-    /*if (!caInfo.black.empty())
-    {
-        for (std::string blackIp : caInfo.getBlackList())
-        {
-            if (blackIp == ip)
-            {
-                LOG(INFO) << "remoteIp is in black list.remoteIp:" << ip ;
-                return false;
-            }
-        }
-    }
-
-    if (!caInfo.white.empty())
-    {
-        bool found = false;
-        for (std::string whiteIp : caInfo.getWhiteList())
-        {
-            if (whiteIp == ip)
-            {
-                found = true;
-                break;
-            }
-        }
-
-        if (!found)
-        {
-            LOG(INFO) << "remoteIp is not in white list.remoteIp:" << ip ;
-            return false;
-        }
-    }*/
     return true;
 }
 
@@ -901,7 +806,7 @@ bool NodeConnParamsManager::checkCA(std::string remoteNodeID, CABaseData & caBas
     bool caVerify = eth::NodeConnParamsManager::CAVerify;
     if (!caVerify)
     {
-        //没有开启，统一返回true
+        
         LOG(INFO) << "CAVerify is false." ;
         return true;
     }
@@ -956,24 +861,7 @@ bool NodeConnParamsManager::checkCA(std::string remoteNodeID, CABaseData & caBas
     LOG(INFO) << "verify ok!!!" ;
     return true;
 }
-// DEPRECATED
-bool NodeConnParamsManager::CheckAndSerialize(const RLP &_rlp, RLPBaseData &_rbd, CABaseData &caBaseData)
-{
-    Public pub = _rlp[4].toHash<Public>();//公钥hex编码
-    Signature signature = _rlp[5].toHash<Signature>();       //获取签名信息
-    std::string caSign = _rlp[6].toString();//ca签名数据
-    std::string caPub256 = _rlp[7].toString();//公钥Hash
-    LOG(INFO) << "SerializeHandShakeRLP,pub:" << pub << ",signature:" << signature << ",caPub256:" << caPub256 ;
 
-    std::string seed(_rbd.getSeed().begin(), _rbd.getSeed().end());
-    caBaseData.setSeed(seed);
-    caBaseData.setNodeSign(signature);
-    caBaseData.setSign(caSign);
-    caBaseData.setPub256(caPub256);
-
-    return CheckAll(pub.hex(), caBaseData);
-    //checkNodeInfo(pub.hex(), wbCAData) && checkCA(pub.hex(), seedStr, wbCAData);
-}
 // DEPRECATED
 bool NodeConnParamsManager::CheckAll(const std::string& sNodeId, CABaseData &caBaseData) {
     return checkNodeInfo(sNodeId, caBaseData) && checkCA(sNodeId, caBaseData);
@@ -1026,7 +914,6 @@ void NodeConnParamsManager::SaveCADataInSession(const std::string nodeId, CABase
     m_host->saveCADataByNodeId(nodeId, caBaseData);
 }
 
-//证书内容更新，或者吊销的
 void NodeConnParamsManager::CAInfoModifyCallback(const std::string& pub256)
 {
     bool caVerify = eth::NodeConnParamsManager::CAVerify;
@@ -1063,8 +950,74 @@ void NodeConnParamsManager::CAVerifyModifyCallback()
     m_host->recheckAllCA();
 };
 
-void NodeConnParamsManager::SetHost(Host *host)
+void NodeConnParamsManager::SetHost(HostApi *host)
 {
     m_host = host;
 };
+
+
+
+
+bool NodeConnParamsManager::getNodeConnInfo(std::string const& sNodeID, NodeConnParams &retNode) const
+{
+	bool bFind = false;
+	Guard l(_xNodeConnParam);
+	if (_mNodeConnParams.find(sNodeID) != _mNodeConnParams.end())
+	{
+		bFind = true;
+		retNode = _mNodeConnParams[sNodeID];
+	}
+	return bFind;
+}
+
+//从内存中 和config数据中查找 更多的是用于自己的
+bool NodeConnParamsManager::getNodeConnInfoBoth(std::string const& sNodeID, NodeConnParams &retNode) const
+{
+	bool bFind = getNodeConnInfo(sNodeID, retNode);
+	if (!bFind)
+	{
+		Guard l(_xConfigNodeConnParam);
+		if (_mConfNodeConnParams.find(sNodeID) != _mConfNodeConnParams.end())
+		{
+			bFind = true;
+			retNode = _mConfNodeConnParams[sNodeID];
+		}
+	}
+	return bFind;
+}
+
+
+void NodeConnParamsManager::getAllNodeConnInfoContract(std::map<std::string, NodeConnParams> & mNodeConnParams) const
+{
+	Guard l(_xNodeConnParam);
+	mNodeConnParams = _mNodeConnParams;
+}
+
+
+void NodeConnParamsManager::getAllConfNodeConnInfo(std::map<std::string, NodeConnParams> & mNodeConnParams) const
+{
+	Guard l(_xConfigNodeConnParam);
+	mNodeConnParams = _mConfNodeConnParams;
+}
+
+void NodeConnParamsManager::getAllNodeConnInfoContractAndConf(std::map<std::string, NodeConnParams> & mNodeConnParams) const
+{
+	mNodeConnParams.clear();
+	{
+		Guard l(_xNodeConnParam); 
+		mNodeConnParams = _mNodeConnParams;
+	}
+
+	{
+		Guard l(_xConfigNodeConnParam);
+		for (auto node : _mConfNodeConnParams)
+		{
+			if (mNodeConnParams.find(node.first) == mNodeConnParams.end())
+			{
+				mNodeConnParams[node.first] = node.second;
+			}
+		}
+	}
+
+}
 

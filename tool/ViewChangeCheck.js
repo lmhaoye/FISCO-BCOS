@@ -6,12 +6,12 @@
  */
 
 var Web3= require('web3');
-var config=require('./config');
+var config=require('../web3lib/config');
 var fs=require('fs');
 var BigNumber = require('bignumber.js');
 
 
-var web3sync = require('./web3sync');
+var web3sync = require('../web3lib/web3sync');
 
 if (typeof web3 !== 'undefined') {
   web3 = new Web3(web3.currentProvider);
@@ -57,23 +57,23 @@ var account=config.account;//web3.eth.accounts[0];
             if( lasttime != 0 ){
                 var diff=block.timestamp - lasttime ;
                 if( diff > 2000 && diff <3000){
-                    console.log("出块超过2s "+i);
+                    console.log("issue block more than 2s "+i);
                     two++;
                 }
                 else if( diff > 3000 && diff <4000){
-                    console.log("出块超过3s "+i);
+                    console.log("issue block more than 3s "+i);
                     three++;
                 }
                 else if( diff > 4000) {
-                    console.log("出块超过4s "+i);
+                    console.log("issue block more than 4s "+i);
                     four++;
                 }
             }
             lasttime=block.timestamp;
         }
-        console.log("出块超过2s :"+((two*100)/sum).toFixed(2)+"%");
-        console.log("出块超过3s :"+((three*100)/sum).toFixed(2)+"%");
-        console.log("出块超过4s :"+((four*100)/sum).toFixed(2)+"%");
+        console.log("issue block more than 2s :"+((two*100)/sum).toFixed(2)+"%");
+        console.log("issue block more than 3s :"+((three*100)/sum).toFixed(2)+"%");
+        console.log("issue block more than 4s :"+((four*100)/sum).toFixed(2)+"%");
 
 
 

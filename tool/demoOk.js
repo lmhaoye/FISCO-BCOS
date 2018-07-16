@@ -7,10 +7,10 @@
  */
 
 var Web3= require('web3');
-var config=require('./config');
+var config=require('../web3lib/config');
 var fs=require('fs');
 var execSync =require('child_process').execSync;
-var web3sync = require('./web3sync');
+var web3sync = require('../web3lib/web3sync');
 var BigNumber = require('bignumber.js');
 
 
@@ -22,7 +22,13 @@ if (typeof web3 !== 'undefined') {
 
 console.log(config);
 
-
+async function sleep(timeout) {  
+  return new Promise((resolve, reject) => {
+        setTimeout(function() {
+              resolve();
+              }, timeout);
+        });
+}
 
 
 var filename="Ok";
@@ -37,11 +43,15 @@ var instance = contract.at(address);
 
 
 
-console.log("合约address:"+address);
+console.log("contract address:"+address);
 
 
 
 (async function(){
+while(1){
+
+  await sleep(1000);
+
 
   var func = "trans(uint256)";
   var params = [15];
@@ -51,6 +61,6 @@ console.log("合约address:"+address);
   var num=instance.get();
   console.log("num="+num.toString());
 
- 
+}
 
 })()

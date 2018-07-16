@@ -21,26 +21,26 @@
  * @date 2014
  */
 
+#include <boost/algorithm/hex.hpp>
 #include <csignal>
 #include <jsonrpccpp/common/exception.h>
-#include <libdevcore/CommonData.h>
-#include <libevmcore/Instruction.h>
-#include <libethereum/Client.h>
-#include <libethereum/BlockQueue.h>
-#include <libpbftseal/PBFT.h>
-#include <libwebthree/WebThree.h>
-#include <libethcore/CommonJS.h>
-#include <libweb3jsonrpc/JsonHelper.h>
-#include <libdevcore/easylog.h>
+
 #include <abi/SolidityExp.h>
 #include <abi/SolidityCoder.h>
 #include <abi/ContractAbiMgr.h>
+#include <libdevcore/CommonData.h>
+#include <libdevcore/easylog.h>
+#include <libevmcore/Instruction.h>
+#include <libethcore/CommonJS.h>
+#include <libethereum/Client.h>
+#include <libethereum/Pool.hpp>
+#include <libethereum/BlockQueue.h>
+#include <libpbftseal/PBFT.h>
+#include <libwebthree/WebThree.h>
 #include <libweb3jsonrpc/JsonHelper.h>
 
-#include <boost/algorithm/hex.hpp>
-
-#include "Eth.h"
 #include "AccountHolder.h"
+#include "Eth.h"
 #include "JsonHelper.h"
 
 using namespace std;
@@ -145,8 +145,8 @@ Json::Value Eth::eth_getProofMerkle(string const& _blockHash, string const& _tra
     trieDb.init();
 
     /*
-     **用交易数据构建trie
-     **key是交易的index,value是transaction
+     **try to build MPT tree from transcations from block
+     **key is the transaction's index in blockk,value is transaction
      */
 
     for (unsigned i = 0; i < transactions.size(); ++i)
@@ -425,21 +425,17 @@ string Eth::eth_sendTransaction(Json::Value const& _json)
 		TransactionSkeleton t = toTransactionSkeleton(_json);
 		setTransactionDefaults(t);
 
-		//判断是否是name方式进行的调用
-		NameCallParams params;
-		if (_json.isMember("data") && _json["data"].isObject())
-		{	//name方式调用
-			t.creation = false;
-			fromJsonGetParams(_json["data"], params);
-			auto r = libabi::ContractAbiMgr::getInstance()->getAddrAndDataFromCache(params.strContractName, params.strFunc, params.strVersion, params.jParams);
-			t.to   = r.first;
-			t.data = r.second;
-
-			LOG(DEBUG) << "call contract address is => " << ("0x" + t.to.hex())
-			           << " ,json=" << _json.toStyledString();
+		CnsParams params;
+		if (isOldCNSCall(t, params, _json))
+		{//CNS v1
+			eth_sendTransactionOldCNSSetParams(t);
+		}
+		else if (isNewCNSCall(t))
+		{//CNS v2
+			eth_sendTransactionNewCNSSetParams(t);
 		}
 
-		if ( t.blockLimit == Invalid256 ) //默认帮忙设置个
+		if ( t.blockLimit == Invalid256 ) //by default
 			t.blockLimit = client()->number() + 100;
 
 
@@ -483,12 +479,12 @@ string Eth::eth_sendTransaction(Json::Value const& _json)
 	}
 	catch (JsonRpcException&)
 	{
-		LOG(ERROR) << boost::current_exception_diagnostic_information() << "\n";
+		LOG(ERROR) << boost::current_exception_diagnostic_information();
 		throw;
 	}
 	catch (...)
 	{
-		LOG(ERROR) << boost::current_exception_diagnostic_information() << "\n";
+		LOG(ERROR) << boost::current_exception_diagnostic_information();
 		BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
 	}
 	BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
@@ -536,7 +532,7 @@ string Eth::eth_sendRawTransaction(std::string const& _rlp)
 	try
 	{
 		auto tx_data = jsToBytes(_rlp, OnFailed::Throw);
-		std::pair<ImportResult, h256> ret = client()->injectTransaction(tx_data);//里面到import的时候会CheckTransaction::Everything 要求校验
+		std::pair<ImportResult, h256> ret = client()->injectTransaction(tx_data);//when do import, it will use CheckTransaction::Everything for check
 		ImportResult ir = ret.first;
 		if ( ImportResult::Success == ir)
 		{
@@ -566,6 +562,50 @@ string Eth::eth_sendRawTransaction(std::string const& _rlp)
 		{
 			BOOST_THROW_EXCEPTION(JsonRpcException("Malformed!!"));
 		}
+		else if ( ImportResult::UTXOInvalidType == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOInvalidType."));
+		}
+		else if ( ImportResult::UTXOJsonParamError == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOJsonParamError."));
+		}
+		else if ( ImportResult::UTXOTokenIDInvalid == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOTokenIDInvalid."));
+		}
+		else if ( ImportResult::UTXOTokenUsed == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOTokenUsed."));
+		}
+		else if ( ImportResult::UTXOTokenOwnerShipCheckFail == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOTokenOwnerShipCheckFail."));
+		}
+		else if ( ImportResult::UTXOTokenLogicCheckFail == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOTokenLogicCheckFail."));
+		}
+		else if ( ImportResult::UTXOTokenAccountingBalanceFail == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOTokenAccountingBalanceFail."));
+		}
+		else if ( ImportResult::UTXOTokenCntOutofRange == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOTokenCntOutofRange."));
+		}
+		else if ( ImportResult::UTXOTokenKeyRepeat == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOTokenKeyRepeat."));
+		}
+		else if ( ImportResult::UTXOTxError == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("Something Other Error in UTXO Tx."));
+		}
+		else if ( ImportResult::UTXOLowEthVersion == ir )
+		{
+			BOOST_THROW_EXCEPTION(JsonRpcException("UTXOLowEthVersion."));
+		}
 		else
 		{
 			BOOST_THROW_EXCEPTION(JsonRpcException(" Something Fail!"));
@@ -584,11 +624,11 @@ string Eth::eth_sendRawTransaction(std::string const& _rlp)
 	}
 }
 
-//jsonCall接口添加
+//add jsonCall
 Json::Value Eth::eth_jsonCall(Json::Value const& _json, std::string const& _blockNumber)
 {
 	/*
-	//请求
+	//request
 	{
 		"jsonrpc": "2.0",
 		"method" : "eth_json_call",
@@ -603,7 +643,7 @@ Json::Value Eth::eth_jsonCall(Json::Value const& _json, std::string const& _bloc
 			"id": 1
 	}
 
-	//返回
+	//response
 	{
 		"id": 7,
 		"jsonrpc" : "2.0",
@@ -614,27 +654,27 @@ Json::Value Eth::eth_jsonCall(Json::Value const& _json, std::string const& _bloc
 		}
 	}
 
-	//jsonCall处理流程:
-	1. 解析name =>  name格式为 ：合约名称-调用方法名称-版本号 注意： 版本号可以省略。
-	2. 根据合约名称+版本号从abi管理模块获取abi，合约地址信息。
-	3. 根据获取的调用方法的abi，以及params参数，序列化参数信息，生成evm直接识别的机器码。
+	//jsonCall process:
+	1. parse name =>  name format:contract name-function-version attention:version can be ignored 。
+	2. get abi info and contract address by contract name and version
+	3. then call the evm with params
 	*/
 
 	LOG(DEBUG) << "eth_jsonCall begin, blocknumber= " << _blockNumber << "json=" << _json.toStyledString();
 
 	try
 	{
-		NameCallParams params;
-		//参数解析
+		CnsParams params;
+		//parse params
 		fromJsonGetParams(_json, params);
 
 		libabi::SolidityAbi abiinfo;
-		//获取abi信息
+		//get abi info
 		libabi::ContractAbiMgr::getInstance()->getContractAbi(params.strContractName, params.strVersion, abiinfo);
 
 		//encode abi
 		const auto &f = abiinfo.getFunction(params.strFunc);
-		//在非constant函数上面进行call调用
+		//do call for non-constant function in contract
 		if (!f.bConstant())
 		{
 			ABI_EXCEPTION_THROW("call on not constant function ,contract|func|version=" + params.strContractName + "|" + params.strFunc + "|" + params.strVersion, libabi::EnumAbiExceptionErrCode::EnumAbiExceptionErrCodeInvalidAbiTransactionOnConstantFunc);
@@ -643,19 +683,17 @@ Json::Value Eth::eth_jsonCall(Json::Value const& _json, std::string const& _bloc
 		Json::Value jResult(Json::objectValue);
 		Json::Value jReturn;
 		{
-			//abi编码
+			//abi info
 			auto strData = libabi::SolidityCoder::getInstance()->encode(f, params.jParams);
 
-			//准备call调用
+        
 			TransactionSkeleton t;
 			setTransactionDefaults(t);
-			//合约地址转换
+			//get contract address
 			t.to = jsToAddress(abiinfo.getAddr());
-			//abi序列化代码
 			t.data = jsToBytes(strData);
-			//call 调用
 			ExecutionResult er = client()->call(t.from, t.value, t.to, t.data, t.gas, t.gasPrice, jsToBlockNumber(_blockNumber), FudgeFactor::Lenient);
-			//abi解码
+			//abi decode
 			jReturn = libabi::SolidityCoder::getInstance()->decode(f, toJS(er.output));
 		}
 
@@ -694,84 +732,510 @@ Json::Value Eth::eth_jsonCall(Json::Value const& _json, std::string const& _bloc
 	}
 }
 
+bool Eth::isUTXOTx(Json::Value const& _json)
+{
+	if (_json.isMember("data") && _json["data"].isString())
+	{
+		string string_data = _json["data"].asString();
+		if (string_data.compare(0,2,"0x") == 0 || string_data.compare(0, 2, "0X") == 0)
+		{
+			return false;
+		}
+
+		Json::Value json;
+		Json::Reader reader;
+		try 
+		{
+			if (reader.parse(_json["data"].asString(), json, false))
+			{
+				if (json.isMember("utxotype") && 
+					json["utxotype"].isInt() &&
+					json["utxotype"].asInt() > 0)
+				{
+					return true;
+				}
+			}
+		}
+		catch (...)
+		{
+			LOG(TRACE) << "Eth::isUTXOTx parse exception";
+			BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
+			return false;
+		}
+	}
+
+	return false;
+}
+
+string Eth::utxoCall(Json::Value const& _json)
+{
+	// [in]
+	Json::Value json;
+	Json::Reader reader;
+
+	// [out]
+	Json::Value root;
+	Json::FastWriter writer;  
+
+	LOG(TRACE) << "Eth::utxoCall UTXOData:" << writer.write(_json);
+
+	if (reader.parse(_json["data"].asString(), json, false))
+	{
+		if (json.isMember("queryparams") && json["queryparams"].isArray() && 
+			json.isMember("utxotype") && json["utxotype"].isInt())
+		{
+			Json::Value utxoData = json["queryparams"];
+			UTXOType utxoType = UTXOType(json["utxotype"].asInt());
+
+			switch (utxoType)
+			{
+				case UTXOType::RegisterAccount:
+				{
+					return utxo_call_registerAccount(utxoData);
+				}
+				case UTXOType::GetToken:
+				{				
+					return utxo_call_getToken(utxoData);
+				}
+				case UTXOType::GetTx:
+				{	
+					return utxo_call_getTx(utxoData);
+				}
+				case UTXOType::GetVault:
+				{
+					return utxo_call_getVault(utxoData);
+				}
+				case UTXOType::SelectTokens:
+				{
+					return utxo_call_selectTokens(utxoData);
+				}
+				case UTXOType::TokenTracking:
+				{
+					return utxo_call_tokenTracking(utxoData);
+				}
+				case UTXOType::GetBalance:
+				{
+					return utxo_call_getBalance(utxoData);
+				}
+				case UTXOType::ShowAll:
+				{
+					client()->getUTXOMgr()->showAll();
+					root["code"] = int(UTXOModel::UTXOExecuteState::Success);
+					root["msg"] = "The result shown in Logs";
+					return writer.write(root);
+				}
+				default:
+				{
+					LOG(TRACE) << "callUTXO Invalid utxo type";
+
+					root["code"] = int(UTXOModel::UTXOExecuteState::UTXOTypeInvalid);
+					root["msg"] = "SendUTXOTransaction Invalid UTXO Type";
+    				return writer.write(root);
+				}
+			}
+		}
+	}
+
+	LOG(TRACE) << "callUTXO Invalid param";
+	root["code"] = int(UTXOModel::UTXOExecuteState::OtherFail);
+	root["msg"] = "SendUTXOTransaction InValid param";
+    return writer.write(root);
+}
+
+bool Eth::getAccount(Json::Value const& utxoData, Address& account, string& ret)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	if (!(utxoData.isMember("account") && utxoData["account"].isString()))
+	{
+		root["code"] = -1;
+		root["msg"] = "Account is necessary";
+		ret = writer.write(root);
+		return false;
+	}
+	else
+	{
+		try 
+		{
+			account = jsToAddress(utxoData["account"].asString());
+		}
+		catch (...)
+		{
+			root["code"] = -1;
+			root["msg"] = "Account is not an address";
+			ret = writer.write(root);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool Eth::getValue(Json::Value const& utxoData, dev::u256& value, std::string& ret)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	if (!(utxoData.isMember("value") && utxoData["value"].isString()))
+	{
+		root["code"] = -1;
+		root["msg"] = "The parameters are necessary";
+		ret = writer.write(root);
+		return false;
+	}
+	else
+	{
+		string str = utxoData["value"].asString();
+		if (str == "undefined")
+		{
+			root["code"] = -1;
+			root["msg"] = "The parameters are necessary";
+			ret = writer.write(root);
+			return false;
+		}
+		for (size_t i = 0; i < str.size(); i++)
+		{
+			int tmp = (int)str[i];
+			if (tmp >= 48 && tmp <= 57)
+			{
+				continue;
+			}
+			else
+			{
+				root["code"] = -1;
+				root["msg"] = "Parameter needs digital format.";
+				ret = writer.write(root);
+				return false;
+			}
+		} 
+
+		value = jsToU256(str);
+	}
+
+	return true;
+}
+
+UTXOModel::QueryUTXOParam Eth::getQueryParam(Json::Value const& utxoData)
+{
+	// 分页查询查询begin和cnt设置默认值0和10
+	u256 begin = 0;
+	u256 cnt = 10;
+	u256 end = 0;
+	u256 total = 0;
+	u256 totalTokenValue = 0;
+	if (utxoData.isMember("begin") && utxoData["begin"].isString())
+	{
+		begin = jsToU256(utxoData["begin"].asString());
+	}
+	if (utxoData.isMember("cnt") && utxoData["cnt"].isString())
+	{
+		cnt = jsToU256(utxoData["cnt"].asString());
+		if (cnt > (u256)10)							// 限制分页每页最大值为10
+		{
+			cnt = (u256)10;
+		}
+	}
+
+	UTXOModel::QueryUTXOParam param = {begin, cnt, end, total, totalTokenValue};
+	return param;
+}
+
+string Eth::utxo_call_registerAccount(Json::Value const& utxoData)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	// 参数个数校验
+	if (utxoData.size() != 1) 
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is expected to 1.";
+		return writer.write(root);
+	}
+
+	// 获取操作参数
+	Address account;
+	string ret;
+	if (!getAccount(utxoData[0], account, ret)) { return ret; }	
+
+	// 执行操作
+	pair<UTXOModel::UTXOExecuteState, string> retState =client()->getUTXOMgr()->registerAccount(account);
+	root["code"] = int(retState.first);
+	root["msg"] = retState.second;
+
+	return writer.write(root);
+}
+
+string Eth::utxo_call_getToken(Json::Value const& utxoData)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	// 参数个数校验
+	if (utxoData.size() != 1) 
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is expected to 1.";
+		return writer.write(root);
+	}
+
+	// 获取查询参数
+	if (!(utxoData[0].isMember("tokenkey") && utxoData[0]["tokenkey"].isString()))
+	{
+		root["code"] = -1;
+		root["msg"] = "Token key parameters is necessary.";
+		return writer.write(root);
+	}
+	string tokenkey = (utxoData[0]["tokenkey"].asString());
+
+	// 执行查询操作				
+	string ret;
+	pair<UTXOModel::UTXOExecuteState, string> retState = client()->getUTXOMgr()->getTokenByKey(tokenkey, ret);
+	LOG(TRACE) << "utxo_call_getToken ret=" << ret;
+	root["code"] = int(retState.first);
+	root["msg"] = retState.second;
+	if (ret.size() > 0) {
+		ret.pop_back();
+		root["data"] = ret;
+	}
+
+	return writer.write(root);
+}
+
+string Eth::utxo_call_getTx(Json::Value const& utxoData)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	// 参数个数校验
+	if (utxoData.size() != 1) 
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is expected to 1.";
+		return writer.write(root);
+	}
+
+	// 获取查询参数
+	if (!(utxoData[0].isMember("txkey") && utxoData[0]["txkey"].isString()))
+	{
+		root["code"] = -1;
+		root["msg"] = "Tx key parameters is necessary.";
+		return writer.write(root);
+	}
+	string txKey = (utxoData[0]["txkey"].asString());
+
+	// 执行查询操作					
+	string ret;
+	pair<UTXOModel::UTXOExecuteState, string> retState = client()->getUTXOMgr()->getTxByKey(txKey, ret);
+	LOG(TRACE) << "utxo_call_getTx ret=" << ret;
+	root["code"] = int(retState.first);
+	root["msg"] = retState.second;
+	if (ret.size() > 0) {
+		ret.pop_back();
+		root["data"] = ret;
+	}
+					
+	return writer.write(root);
+}
+
+string Eth::utxo_call_getVault(Json::Value const& utxoData)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	// 参数个数校验
+	if (utxoData.size() != 1) 
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is expected to 1.";
+		return writer.write(root);
+	}
+	
+	// 获取查询参数
+	Address account;
+	string ret;
+	if (!getAccount(utxoData[0], account, ret)) { return ret; }		
+	u256 value;
+	if (!getValue(utxoData[0], value, ret)) { return ret; }
+	if (value >= UTXOModel::TokenState::TokenStateCnt)
+	{
+		root["code"] = -1;
+		root["msg"] = "Token State in wrong format, from 0 (0 means full query) to " + toString((int)UTXOModel::TokenState::TokenStateCnt);
+		return writer.write(root);
+	}
+	UTXOModel::TokenState tokenState = (UTXOModel::TokenState)value;
+	UTXOModel::QueryUTXOParam param = getQueryParam(utxoData[0]);	// 分页查询参数
+
+	// 执行查询操作
+	vector<string> tokenKeys;
+	pair<UTXOModel::UTXOExecuteState, string> retState = client()->getUTXOMgr()->getVaultByAccountByPart(account, tokenState, tokenKeys, param);
+	root["code"] = int(retState.first);
+	root["msg"] = retState.second;
+	if (tokenKeys.size() > 0)
+	{
+		Json::Value data;
+		for (string key: tokenKeys) { data.append(key); }
+		root["data"] = data;
+	}
+	root["begin"] = (int)param.start;
+	root["cnt"] = (int)param.cnt;
+	root["end"] = (int)param.end;
+	root["total"] = (int)param.total;
+					
+	return writer.write(root);
+}
+
+string Eth::utxo_call_tokenTracking(Json::Value const& utxoData)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	// 参数个数校验
+	if (utxoData.size() != 1) 
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is expected to 1.";
+		return writer.write(root);
+	}
+
+	// 获取查询参数
+	if (!(utxoData[0].isMember("tokenkey") && utxoData[0]["tokenkey"].isString()))
+	{
+		root["code"] = -1;
+		root["msg"] = "Token key parameters is necessary.";
+		return writer.write(root);
+	}
+	string token = (utxoData[0]["tokenkey"].asString());
+	UTXOModel::QueryUTXOParam param = getQueryParam(utxoData[0]);	// 分页查询参数
+
+	// 执行查询操作
+	vector<string> tokenKeys;
+	pair<UTXOModel::UTXOExecuteState, string> retState = client()->getUTXOMgr()->tokenTrackingByPart(token, tokenKeys, param);
+	root["code"] = int(retState.first);
+	root["msg"] = retState.second;
+	if (tokenKeys.size() > 0)
+	{
+		Json::Value data;
+		for (string key: tokenKeys) { data.append(key); }
+		root["data"] = data;
+	}
+	root["begin"] = (int)param.start;
+	root["cnt"] = (int)param.cnt;
+	root["end"] = (int)param.end;
+	root["total"] = (int)param.total;
+					
+	return writer.write(root);
+}
+
+string Eth::utxo_call_selectTokens(Json::Value const& utxoData)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	// 参数个数校验
+	if (utxoData.size() != 1) 
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is expected to 1.";
+		return writer.write(root);
+	}
+	
+	// 获取查询参数
+	Address account;
+	u256 value;
+	string ret;
+	if (!getAccount(utxoData[0], account, ret)) { return ret; }					
+	if (!getValue(utxoData[0], value, ret)) { return ret; }
+	if (0 == value)
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is bigger than 0.";
+		return writer.write(root);
+	}
+	UTXOModel::QueryUTXOParam param = getQueryParam(utxoData[0]);	// 分页查询参数
+
+	// 执行查询操作
+	vector<string> tokenKeys;
+	pair<UTXOModel::UTXOExecuteState, string> retState = client()->getUTXOMgr()->selectTokensByPart(account, value, tokenKeys, param);
+	root["code"] = int(retState.first);
+	root["msg"] = retState.second;
+	if (tokenKeys.size() > 0)
+	{
+		Json::Value data;
+		for (string key: tokenKeys) { data.append(key); }
+		root["data"] = data;
+	}
+	root["begin"] = (int)param.start;
+	root["cnt"] = (int)param.cnt;
+	root["end"] = (int)param.end;
+	root["total"] = (int)param.total;
+	root["totalTokenValue"] = (int)param.totalValue;
+	
+	return writer.write(root);
+}
+
+string Eth::utxo_call_getBalance(Json::Value const& utxoData)
+{
+	Json::Value root;
+	Json::FastWriter writer; 
+
+	// 参数个数校验
+	if (utxoData.size() != 1) 
+	{
+		root["code"] = -1;
+		root["msg"] = "The size of parameters is expected to 1.";
+		return writer.write(root);
+	}
+	
+	// 获取查询参数
+	Address account;
+	string ret;
+	if (!getAccount(utxoData[0], account, ret)) { return ret; }
+
+	// 执行查询操作
+	u256 balance = 0;
+	pair<UTXOModel::UTXOExecuteState, string> retState = client()->getUTXOMgr()->getBalanceByAccount(account, balance);
+	root["code"] = int(retState.first);
+	root["msg"] = retState.second;
+	root["balance"] = (int)balance;
+	return writer.write(root);
+}
 
 string Eth::eth_call(Json::Value const& _json, string const& _blockNumber)
 {
+	if (isUTXOTx(_json))
+	{
+		LOG(TRACE) << "Eth::eth_call is UTXO";
+		return utxoCall(_json);
+	}
+	else {
+		LOG(TRACE) << "Eth::eth_call isnot UTXO";
+	}
+
 	try
 	{
+		LOG(DEBUG) << "eth_call # _json = " << _json.toStyledString();
+
 		TransactionSkeleton t = toTransactionSkeleton(_json);
 		setTransactionDefaults(t);
 
-		//noto by octopuswang 2017-09-11
-		bool isANSCall = false;
-		NameCallParams params;
-		//web3j的兼容
-		if (_json.isMember("data") && _json["data"].isString())
-		{
-			string string_data = _json["data"].asString();
-			if (string_data.compare(0,2,"0x") == 0 || string_data.compare(0, 2, "0X") == 0)
-			{
-				string_data.erase(0, 2);
-			}
-
-			string json;
-			boost::algorithm::unhex(string_data.begin(), string_data.end(), std::back_inserter(json));
-			if (fromJsonGetParams(json, params))
-			{
-				isANSCall = true;
-				LOG(DEBUG) << "web3j call contract data => " << string_data;
-				LOG(DEBUG) << "web3j call contract is => " << json;
-			}
+		std::string result;
+		CnsParams params;
+		if (isOldCNSCall(t, params, _json))
+		{//CNS v1
+			result = eth_callOldCNS(t, params, _blockNumber);
 		}
-		else if (_json.isMember("data") && _json["data"].isObject())
-		{
-			isANSCall = true;
-			fromJsonGetParams(_json["data"], params);
-		}
-
-		if (isANSCall)
-		{
-			libabi::SolidityAbi abiinfo;
-			//2. 获取abi信息
-			libabi::ContractAbiMgr::getInstance()->getContractAbi(params.strContractName, params.strVersion, abiinfo);
-
-			//encode abi
-			const auto &f = abiinfo.getFunction(params.strFunc);
-			//在非constant函数上面进行call调用
-			if (!f.bConstant())
-			{
-				ABI_EXCEPTION_THROW("call on not constant function ,contract|func|version=" + params.strContractName + "|" + params.strFunc + "|" + params.strVersion, libabi::EnumAbiExceptionErrCode::EnumAbiExceptionErrCodeInvalidAbiTransactionOnConstantFunc);
-			}
-
-			//3. abi序列化
-			std::string strData = libabi::SolidityCoder::getInstance()->encode(abiinfo.getFunction(params.strFunc), params.jParams);
-			//4. 调用合约地址 执行代码赋值。
-			t.to   = dev::jsToAddress(abiinfo.getAddr());
-			t.data = dev::jsToBytes(strData);
-
-			LOG(DEBUG) << "call contract address is => " << abiinfo.getAddr()
-			           << " ,blockNumber= " << _blockNumber
-			           << " ,json=" << _json.toStyledString()
-			           ;
-			//5. call调用
-			ExecutionResult er = client()->call(t.from, t.value, t.to, t.data, t.gas, t.gasPrice, jsToBlockNumber(_blockNumber), FudgeFactor::Lenient);
-			//6. 执行结果abi反序列化
-			auto jReturn = libabi::SolidityCoder::getInstance()->decode(f, toJS(er.output));
-
-			Json::FastWriter writer;
-			std::string out = writer.write(jReturn);
-
-			LOG(DEBUG) << "abi eth call is => "
-				<< " ,out=" << out
-				;
-
-			return out;
+		else if (isNewCNSCall(t))
+		{//CNS v2
+			result = eth_callNewCNS(t, _blockNumber);
 		}
 		else
-		{
-			ExecutionResult er = client()->call(t.from, t.value, t.to, t.data, t.gas, t.gasPrice, jsToBlockNumber(_blockNumber), FudgeFactor::Lenient);
-			return toJS(er.output);
+		{//default
+			result = eth_callDefault(t, _blockNumber);
 		}
+
+		return result;
 	}
 	catch ( NoCallPermission const &in)
 	{
@@ -1209,4 +1673,337 @@ string Eth::eth_verifiedTransactionsQueueSize()
 		BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
 	}
 	return "";
+}
+
+std::string Eth::eth_getCodeCNS(std::string const& strContractName, std::string const& _blockNumber)
+{
+	try
+	{
+		LOG(TRACE) << "getCodeCNS begin , contract name = " << strContractName;
+
+		auto rVectorString = libabi::SolidityTools::splitString(strContractName, libabi::SolidityTools::CNS_SPLIT_STRING);
+		std::string contract = (!rVectorString.empty() ? rVectorString[0] : "");
+		std::string version = (rVectorString.size() > 1 ? rVectorString[1] : "");
+
+		LOG(TRACE) << "getCodeCNS ## contract = " << contract << " ,version = " << version;
+
+		// get abi info
+		libabi::SolidityAbi abiinfo;
+		libabi::ContractAbiMgr::getInstance()->getContractAbi(contract, version, abiinfo);
+		LOG(DEBUG) << "getCodeCNS ## contract address is => " << abiinfo.getAddr();
+
+		return toJS(client()->codeAt(jsToAddress(abiinfo.getAddr()), jsToBlockNumber(_blockNumber)));
+	}
+	catch (...)
+	{
+		BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
+	}
+}
+
+std::string Eth::eth_getBalanceCNS(std::string const& strContractName, std::string const& _blockNumber)
+{
+	try
+	{
+		LOG(TRACE) << "getBalanceCNS begin , contract name = " << strContractName;
+
+		auto rVectorString = libabi::SolidityTools::splitString(strContractName, libabi::SolidityTools::CNS_SPLIT_STRING);
+		std::string contract = (!rVectorString.empty() ? rVectorString[0] : "");
+		std::string version = (rVectorString.size() > 1 ? rVectorString[1] : "");
+
+		LOG(TRACE) << "getBalanceCNS ## contract = " << contract << " ,version = " << version;
+
+		// get abi info
+		libabi::SolidityAbi abiinfo;
+		libabi::ContractAbiMgr::getInstance()->getContractAbi(contract, version, abiinfo);
+
+		LOG(DEBUG) << "getBalanceCNS ## contract address is => " << abiinfo.getAddr();
+
+		return toJS(client()->balanceAt(jsToAddress(abiinfo.getAddr()), jsToBlockNumber(_blockNumber)));
+	}
+	catch (...)
+	{
+		BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
+	}
+}
+
+std::string Eth::eth_getStorageAtCNS(std::string const& strContractName, std::string const& _position, std::string const& _blockNumber)
+{
+	try
+	{
+		LOG(TRACE) << "getStorageAtCNS begin , contract name = " << strContractName;
+
+		auto rVectorString = libabi::SolidityTools::splitString(strContractName, libabi::SolidityTools::CNS_SPLIT_STRING);
+		std::string contract = (!rVectorString.empty() ? rVectorString[0] : "");
+		std::string version = (rVectorString.size() > 1 ? rVectorString[1] : "");
+
+		LOG(TRACE) << "getStorageAtCNS ## contract = " << contract << " ,version = " << version;
+
+		// get abi info
+		libabi::SolidityAbi abiinfo;
+		libabi::ContractAbiMgr::getInstance()->getContractAbi(contract, version, abiinfo);
+		LOG(DEBUG) << "getStorageAtCNS ## contract address is => " << abiinfo.getAddr();
+
+		return toJS(toCompactBigEndian(client()->stateAt(jsToAddress(abiinfo.getAddr()), jsToU256(_position), jsToBlockNumber(_blockNumber)), 32));
+	}
+	catch (...)
+	{
+		BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
+	}
+}
+
+std::string Eth::eth_getTransactionCountCNS(std::string const& strContractName, std::string const& _blockNumber)
+{
+	try
+	{
+		LOG(TRACE) << "getTransactionCountCNS begin, contract name = " << strContractName;
+
+		auto rVectorString = libabi::SolidityTools::splitString(strContractName, libabi::SolidityTools::CNS_SPLIT_STRING);
+		std::string contract = (!rVectorString.empty() ? rVectorString[0] : "");
+		std::string version = (rVectorString.size() > 1 ? rVectorString[1] : "");
+
+		LOG(TRACE) << "getTransactionCountCNS ## contract = " << contract << " ,version = " << version;
+
+		// get abi info
+		libabi::SolidityAbi abiinfo;
+		libabi::ContractAbiMgr::getInstance()->getContractAbi(contract, version, abiinfo);
+		LOG(DEBUG) << "getTransactionCountCNS ## contract address = " << abiinfo.getAddr();
+
+		return toJS(client()->countAt(jsToAddress(abiinfo.getAddr()), jsToBlockNumber(_blockNumber)));
+	}
+	catch (...)
+	{
+		BOOST_THROW_EXCEPTION(JsonRpcException(Errors::ERROR_RPC_INVALID_PARAMS));
+	}
+}
+
+bool Eth::isDefaultCall(const TransactionSkeleton &t, CnsParams &params, const Json::Value &_json)
+{
+	return !isOldCNSCall(t,params,_json) && !isNewCNSCall(t);
+}
+
+bool Eth::isOldCNSCall(const TransactionSkeleton &t, CnsParams &params, const Json::Value &_json)
+{
+	//in CNS, data is json object
+	if (!t.jData.empty())
+	{
+		fromJsonGetParams(t.jData, params); //parse params
+		return true;
+	}
+ 
+	//compatible with web3j
+	string strData = _json["data"].asString();
+	if (strData.compare(0, 2, "0x") == 0 || strData.compare(0, 2, "0X") == 0)
+	{
+		strData.erase(0, 2);
+	}
+
+	string json;
+	boost::algorithm::unhex(strData.begin(), strData.end(), std::back_inserter(json));
+
+	return fromJsonGetParams(json, params);
+}
+
+bool Eth::isNewCNSCall(const TransactionSkeleton &t)
+{
+	return !t.strContractName.empty();
+}
+
+void Eth::eth_sendTransactionOldCNSSetParams(TransactionSkeleton &t)
+{
+	CnsParams params;
+	fromJsonGetParams(t.jData, params);
+	auto r = libabi::ContractAbiMgr::getInstance()->getAddrAndDataFromCache(params.strContractName, params.strFunc, params.strVersion, params.jParams);
+	t.to   = r.first;
+	t.data = r.second;
+	t.creation = false;
+
+	LOG(DEBUG) << "sendTransactionOldCNS # address = " << ("0x" + t.to.hex())
+		<< " ,contract = " << params.strContractName
+		<< " ,func = " << params.strFunc
+		<< " ,version = " << params.strVersion
+		;
+}
+
+void Eth::eth_sendTransactionNewCNSSetParams(TransactionSkeleton &t)
+{
+	//1. get contract name and version
+	auto rVectorString = libabi::SolidityTools::splitString(t.strContractName, libabi::SolidityTools::CNS_SPLIT_STRING);
+	std::string contract = (!rVectorString.empty() ? rVectorString[0] : "");
+	std::string version = (rVectorString.size() > 1 ? rVectorString[1] : "");
+
+	LOG(DEBUG) << "sendTransactionNewCNS ## contract = " << contract << " ,version = " << version;
+
+	//2. get abi info
+	libabi::SolidityAbi abiinfo;
+	libabi::ContractAbiMgr::getInstance()->getContractAbi(contract, version, abiinfo);
+	LOG(DEBUG) << "sendTransactionNewCNS ## contract_name = " << t.strContractName << " ,contract_address = " << abiinfo.getAddr();
+
+	//3. get contract address
+	t.to = dev::jsToAddress(abiinfo.getAddr());
+	t.creation = false;
+}
+
+std::string Eth::eth_callDefault(TransactionSkeleton &t, std::string const& _blockNumber)
+{
+	LOG(DEBUG) << "eth_callDefault # " ;
+	ExecutionResult er = client()->call(t.from, t.value, t.to, t.data, t.gas, t.gasPrice, jsToBlockNumber(_blockNumber), FudgeFactor::Lenient);
+	return toJS(er.output);
+}
+
+std::string Eth::eth_callOldCNS(TransactionSkeleton &t, const CnsParams &params, std::string const& _blockNumber)
+{
+	LOG(DEBUG) << "eth_callOldCNS # contract|version|func|params => " 
+		<< params.strContractName << "|"
+		<< params.strVersion << "|"
+		<< params.strFunc << "|"
+		<< params.jParams.toStyledString();
+
+	libabi::SolidityAbi abiinfo;
+	//2. get abi info
+	libabi::ContractAbiMgr::getInstance()->getContractAbi(params.strContractName, params.strVersion, abiinfo);
+
+	//encode abi
+	const auto &f = abiinfo.getFunction(params.strFunc);
+	//do call invoke in non-constant function
+	if (!f.bConstant())
+	{
+		ABI_EXCEPTION_THROW("call on not constant function ,contract|func|version=" + params.strContractName + "|" + params.strFunc + "|" + params.strVersion, libabi::EnumAbiExceptionErrCode::EnumAbiExceptionErrCodeInvalidAbiTransactionOnConstantFunc);
+	}
+
+	//3. abi serialize
+	std::string strData = libabi::SolidityCoder::getInstance()->encode(abiinfo.getFunction(params.strFunc), params.jParams);
+	//4. call contract
+	t.to = dev::jsToAddress(abiinfo.getAddr());
+	t.data = dev::jsToBytes(strData);
+
+	LOG(DEBUG) << "eth_callOldCNS # address => " << abiinfo.getAddr();
+	//5. do call
+	ExecutionResult er = client()->call(t.from, t.value, t.to, t.data, t.gas, t.gasPrice, jsToBlockNumber(_blockNumber), FudgeFactor::Lenient);
+	//6. decode result
+	auto jReturn = libabi::SolidityCoder::getInstance()->decode(f, toJS(er.output));
+
+	Json::FastWriter writer;
+	std::string out = writer.write(jReturn);
+
+	LOG(DEBUG) << "eth_callOldCNS # result = " << out;
+
+	return out;
+}
+
+std::string Eth::eth_callNewCNS(TransactionSkeleton &t, std::string const& _blockNumber)
+{
+	//1. get contract name and version
+	auto rVectorString = libabi::SolidityTools::splitString(t.strContractName, libabi::SolidityTools::CNS_SPLIT_STRING);
+	std::string contract = (!rVectorString.empty() ? rVectorString[0] : "");
+	std::string version = (rVectorString.size() > 1 ? rVectorString[1] : "");
+
+	LOG(TRACE) << "eth_callNewCNS ## contract = " << contract << " ,version = " << version;
+
+	//2. get abi info
+	libabi::SolidityAbi abiinfo;
+	libabi::ContractAbiMgr::getInstance()->getContractAbi(contract, version, abiinfo);
+	LOG(DEBUG) << "eth_callNewCNS ## contract_address = " << abiinfo.getAddr();
+
+	//3. get contract address
+	t.to = dev::jsToAddress(abiinfo.getAddr());
+
+	//4. call invoke
+	ExecutionResult er = client()->call(t.from, t.value, t.to, t.data, t.gas, t.gasPrice, jsToBlockNumber(_blockNumber), FudgeFactor::Lenient);
+
+	return toJS(er.output);
+}
+
+Json::Value Eth::eth_getCmByRange(Json::Value const &range)
+{
+	/*
+curl --data '{"jsonrpc":"2.0","method":"eth_getCmByRange","id":1,"params":[{"from":0,"to":-1}]}' localhost:8545
+*/
+	Json::Value ret;
+	ret["from"] = 0;
+	ret["to"] = 0;
+	Json::Value cms(Json::arrayValue);
+	try
+	{
+		// [from， to)
+		int64_t from = range["from"].asInt64();
+		int64_t to = range["to"].asInt64();
+
+		CMPool_Singleton &pool = CMPool_Singleton::Instance();
+		poolBlockNumber_t cbn = client()->number();
+
+		if (to <= 0)
+			to = (int64_t)pool.size(cbn);
+		else
+			to = min(to, (int64_t)pool.size(cbn));
+		//LOG(TRACE) << "pool size: " << pool.size(cbn) << std::endl;
+
+		ret["from"] = from;
+		ret["to"] = to;
+
+		//[from,to) error return [null]
+		if (from >= to || from < 0)
+		{
+			ret["cms"] = cms;
+			return ret;
+		}
+
+		for (; from < to; from++)
+		{
+			cms.append(pool.get(cbn, from));
+		}
+	}
+	catch (std::exception &e)
+	{
+		LOG(ERROR) << e.what() << endl;
+	}
+	ret["cms"] = cms;
+	return ret;
+}
+
+Json::Value Eth::eth_getGovDataByRange(Json::Value const &range)
+{
+	/*
+curl --data '{
+"jsonrpc":"2.0","method":"eth_getGovDataByRange","id":1,"params":[{"from":0,"to":-1}]
+}' localhost:8545
+*/
+	Json::Value ret;
+	ret["from"] = 0;
+	ret["to"] = 0;
+	Json::Value g_datas(Json::arrayValue);
+	try
+	{
+		// [from， to)
+		int64_t from = range["from"].asInt();
+		int64_t to = range["to"].asInt();
+
+		GovDataPool_Singleton &pool = GovDataPool_Singleton::Instance();
+		poolBlockNumber_t cbn = client()->number();
+
+		if (to <= 0)
+			to = (int64_t)pool.size(cbn);
+		else
+			to = min(to, (int64_t)pool.size(cbn));
+
+		ret["from"] = from;
+		ret["to"] = to;
+
+		//[from,to) error return [null]
+		if (from >= to || from < 0)
+		{
+			ret["G_datas"] = g_datas;
+			return ret;
+		}
+
+		for (; from < to; from++)
+		{
+			g_datas.append(pool.get(cbn, from));
+		}
+	}
+	catch (std::exception &e)
+	{
+		LOG(ERROR) << e.what() << endl;
+	}
+	ret["G_datas"] = g_datas;
+	return ret;
 }

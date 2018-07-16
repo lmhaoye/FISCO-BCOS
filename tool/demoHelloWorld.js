@@ -7,10 +7,10 @@
  */
 
 var Web3= require('web3');
-var config=require('./config');
+var config=require('../web3lib/config');
 var fs=require('fs');
 var execSync =require('child_process').execSync;
-var web3sync = require('./web3sync');
+var web3sync = require('../web3lib/web3sync');
 var BigNumber = require('bignumber.js');
 
 
@@ -37,14 +37,14 @@ var instance = contract.at(address);
 
 
 
-console.log(filename+"合约address:"+address);
+console.log(filename+"contract address:"+address);
 
 
 
 (async function(){
 
  var name=instance.get();
-  console.log("接口调用前读取接口返回:"+name.toString());
+ console.log("HelloWorld contract get function call first :"+name.toString());
   
   var func = "set(string)";
   var params = ["HelloWorld!"];
@@ -52,10 +52,10 @@ console.log(filename+"合约address:"+address);
 
 
 
-  console.log("调用更新接口设置name=\"HelloWorld\""+'(交易哈希：'+receipt.transactionHash+')');
+  console.log("HelloWorld contract set function call , "+'(transaction hash ：'+receipt.transactionHash+')');
 
   name=instance.get();
-  console.log("接口调用后读取接口返回:"+name.toString());
+  console.log("HelloWorld contract get function call again :"+name.toString());
 
  
 

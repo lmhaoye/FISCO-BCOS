@@ -24,6 +24,7 @@
 #include <ctime>
 #include <boost/filesystem.hpp>
 #include <boost/timer.hpp>
+
 #include <libdevcore/CommonIO.h>
 #include <libdevcore/Assertions.h>
 #include <libdevcore/TrieHash.h>
@@ -31,6 +32,9 @@
 #include <libethcore/Exceptions.h>
 #include <libethcore/SealEngine.h>
 #include <libevm/VMFactory.h>
+#include <UTXO/UTXOSharedData.h>
+#include <UTXO/UTXOTxQueue.h>
+
 #include "BlockChain.h"
 #include "Defaults.h"
 #include "ExtVM.h"
@@ -48,7 +52,7 @@ namespace fs = boost::filesystem;
 
 #define ETH_TIMED_ENACTMENTS 0
 
-unsigned Block::c_maxSyncTransactions = 100; // 单次打包最多条数，控制这个数量不要过高，防止雪崩
+unsigned Block::c_maxSyncTransactions = 100; 
 
 
 Block::Block(BlockChain const& _bc, OverlayDB const& _db, BaseState _bs, Address const& _author):
@@ -84,7 +88,8 @@ Block::Block(Block const& _s):
     m_currentBlock(_s.m_currentBlock),
     m_currentBytes(_s.m_currentBytes),
     m_author(_s.m_author),
-    m_sealEngine(_s.m_sealEngine)
+    m_sealEngine(_s.m_sealEngine),
+    m_utxoMgr(_s.m_utxoMgr)
 {
     m_committedToSeal = false;
 }
@@ -106,6 +111,9 @@ Block& Block::operator=(Block const& _s)
 
     m_precommit = m_state;
     m_committedToSeal = false;
+
+    m_utxoMgr = _s.m_utxoMgr;
+
     return *this;
 }
 
@@ -119,7 +127,7 @@ void Block::resetCurrent(u256 const& _timestamp)
     m_currentBlock.setTimestamp(max(m_previousBlock.timestamp() + 1, _timestamp));
     m_currentBytes.clear();
 
-
+    m_utxoMgr.clearDBRecord();
 
     sealEngine()->populateFromParent(m_currentBlock, m_previousBlock);
 
@@ -243,13 +251,10 @@ bool Block::sync(BlockChain const& _bc, h256 const& _block, BlockHeader const& _
 #endif
     if (bi == m_currentBlock)
     {
-        //自己挖矿产生的
-        //当前块为我们的最新块，则将当前块赋值给上一块
-        //同时重置当前块
         // We mined the last block.
         // Our state is good - we just need to move on to next.
         m_previousBlock = m_currentBlock;
-        resetCurrent();                 //更新为空块
+        resetCurrent();                 
         ret = true;
     }
     else if (bi == m_previousBlock)
@@ -262,8 +267,7 @@ bool Block::sync(BlockChain const& _bc, h256 const& _block, BlockHeader const& _
         // New blocks available, or we've switched to a different branch. All change.
         // Find most recent state dump and replay what's left.
         // (Most recent state dump might end up being genesis.)
-        //非自己挖出的矿，从别人处导入的新块???
-        if (m_state.db().lookup(bi.stateRoot()).empty())    // TODO: API in State for this?
+        if (m_state.db().lookup(bi.stateRoot()).empty())    
         {
             LOG(WARNING) << "Unable to sync to" << bi.hash() << "; state root" << bi.stateRoot() << "not found in database.";
             LOG(WARNING) << "Database corrupt: contains block without stateRoot:" << bi;
@@ -334,12 +338,28 @@ pair<TransactionReceipts, bool> Block::sync(BlockChain const& _bc, TransactionQu
     } else {
         max_sync_txs = static_cast<unsigned>(_max_block_txs > m_transactions.size() ? _max_block_txs - m_transactions.size() : 0);
     }
-    //auto ts = _tq.topTransactions(max_sync_txs, m_transactionSet);
-    //ret.second = (ts.size() == max_sync_txs);  // say there's more to the caller if we hit the limit
+  
     auto ts = _tq.allTransactions();
 
     LastHashes lh;
     unsigned goodTxs = 0;
+    std::map<h256, bool> parallelUTXOTx;
+    size_t parallelUTXOTxCnt = 0;
+
+    if (lh.empty()) { lh = _bc.lastHashes(); }
+    m_utxoMgr.setCurBlockInfo(this, lh);
+    if (_exec)
+    {
+        getParallelUTXOTx(ts, parallelUTXOTx, parallelUTXOTxCnt);
+        m_state.setParallelUTXOTx(parallelUTXOTx);
+        LOG(TRACE) << "Block::sync parallelUTXOTxCnt:" << parallelUTXOTxCnt;
+    }
+    UTXOModel::UTXOTxQueue utxoTxQueue(parallelUTXOTxCnt, &m_utxoMgr);
+    m_onParallelTxQueueReady = false;
+    if (_exec && parallelUTXOTxCnt > 0)
+    {
+        m_parallelEnd = utxoTxQueue.onReady([ = ]() { this->onUTXOTxQueueReady(); });
+    }
     //for (int goodTxs = max(0, (int)ts.size() - 1); goodTxs < (int)ts.size(); )
     {
         //goodTxs = 0;
@@ -348,43 +368,16 @@ pair<TransactionReceipts, bool> Block::sync(BlockChain const& _bc, TransactionQu
             {
                 try
                 {
-                    LOG(INFO) << " Hash=" << (t.sha3()) << ",Randid=" << t.randomid() << ",打包=" << utcTime();
-
+                    LOG(TRACE) << "PACK-TX: Hash=" << (t.sha3()) << ",Randid=" << t.randomid() << ",time=" << utcTime();
                     //交易打包前检查
-                    u256 check = _bc.filterCheck(t, FilterCheckScene::PackTranscation);
-                    if ( (u256)SystemContractCode::Ok != check  )
-                    {
-                        LOG(WARNING) << "Block::sync " << t.sha3() << " transition filterCheck PackTranscation Fail" << check;
-                        BOOST_THROW_EXCEPTION(FilterCheckFail());
-                    }
-
-                    /*if ( t.isCreation()  ) //检查是否有部署权限
-                    {
-                        check = _bc.filterCheck(t, FilterCheckScene::CheckDeploy);
-                        if ( (u256)SystemContractCode::Ok != check  )
-                        {
-                            LOG(WARNING) << "Block::sync " << t.sha3() << " transition  NoDeployPermission";
-                            BOOST_THROW_EXCEPTION(NoDeployPermission());
-                        }
-                    }*/
-
-                    if ( ! _bc.isBlockLimitOk(t)  ) //blocklimit 检查
-                    {
-                        LOG(WARNING) << "Block::sync " << t.sha3() << " transition blockLimit=" << t.blockLimit() << " chain number=" << _bc.number();
-                        BOOST_THROW_EXCEPTION(BlockLimitCheckFail());
-                    }
-                    //cout<<"Block::sync "<<_bc.nonceCheck()<<"\n";
-
-                    if ( !_bc.isNonceOk(t) ) //链上已经出现了
-                    {
-                        LOG(WARNING) << "Block::sync " << t.sha3() << " " << t.randomid();
-                        BOOST_THROW_EXCEPTION(NonceCheckFail());
-                    }
                     for ( size_t pIndex = 0; pIndex < m_transactions.size(); pIndex++) //多做一步，当前块内也不能重复出现
                     {
                         if ( (m_transactions[pIndex].from() == t.from() ) && (m_transactions[pIndex].randomid() == t.randomid()) )
                             BOOST_THROW_EXCEPTION(NonceCheckFail());
                     }//for
+
+                    UTXOType utxoType = t.getUTXOType();
+	        		LOG(TRACE) << "Block::sync utxoType:" << utxoType;
 
                     if (_exec) {
                         u256 _t = _gp.ask(*this);
@@ -394,6 +387,10 @@ pair<TransactionReceipts, bool> Block::sync(BlockChain const& _bc, TransactionQu
                         //Timer t;
                         if (lh.empty())
                             lh = _bc.lastHashes();
+                        if (parallelUTXOTx[t.sha3()])
+                        {
+                            utxoTxQueue.enqueue(t);
+                        }
                         execute(lh, t, Permanence::Committed, OnOpFunc(), &_bc);
                         ret.first.push_back(m_receipts.back());
                     } else {
@@ -454,10 +451,6 @@ pair<TransactionReceipts, bool> Block::sync(BlockChain const& _bc, TransactionQu
                     else
                     {
                         LOG(TRACE) << t.sha3() << "Temporarily no gas left in current block (txs gas > block's gas limit)";
-                        //_tq.drop(t.sha3());
-                        // Temporarily no gas left in current block.
-                        // OPTIMISE: could note this and then we don't evaluate until a block that does have the gas left.
-                        // for now, just leave alone.
                     }
                 }
                 catch (Exception const& _e)
@@ -479,6 +472,26 @@ pair<TransactionReceipts, bool> Block::sync(BlockChain const& _bc, TransactionQu
             }
         ret.second = (goodTxs >= max_sync_txs);
     }
+    if (_exec && parallelUTXOTxCnt > 0)
+    {
+        StartWaitingForResult(parallelUTXOTxCnt);
+        LOG(TRACE) << "Block::sync parallelTx end";
+        map<h256, UTXOModel::UTXOExecuteState> mapTxResult = utxoTxQueue.getTxResult(); 
+        for (auto const& t : ts)
+        {
+            h256 hash = t.sha3();
+            if (parallelUTXOTx[hash])
+            {
+                if (!mapTxResult.count(hash) || 
+                    UTXOModel::UTXOExecuteState::Success != mapTxResult[hash])
+                {
+                    LOG(TRACE) << hash << " Transaction Error, drop";
+                    _tq.drop(hash);
+                    BOOST_THROW_EXCEPTION(UTXOTxError());
+                }
+            }
+        }
+    }
     return ret;
 }
 
@@ -498,13 +511,87 @@ TransactionReceipts Block::exec(BlockChain const& _bc, TransactionQueue& _tq)
     DEV_TIMED_ABOVE("lastHashes", 500)
     lh = _bc.lastHashes();
 
+    std::map<h256, bool> parallelUTXOTx;
+    size_t parallelUTXOTxCnt = 0;
+    getParallelUTXOTx(m_transactions, parallelUTXOTx, parallelUTXOTxCnt);
+
+    if (parallelUTXOTxCnt > 0)
+    {
+        return execUTXOInBlock(_bc, _tq, lh, parallelUTXOTx, parallelUTXOTxCnt);
+    }
+
     unsigned i = 0;
-    DEV_TIMED_ABOVE("txExec,blk=" + toString(info().number()) + ",txs=" + toString(m_transactions.size()), 500)
+    DEV_TIMED_ABOVE("Block::exec txExec,blk=" + toString(info().number()) + ",txs=" + toString(m_transactions.size()), 500)
     for (Transaction const& tr : m_transactions)
     {
         try
         {
             LOG(TRACE) << "Block::exec transaction: " << tr.randomid() << tr.from() /*<< state().transactionsFrom(tr.from()) */ << tr.value() << toString(tr.sha3());
+            execute(lh, tr, Permanence::OnlyReceipt, OnOpFunc(), &_bc);
+        }
+        catch (Exception& ex)
+        {
+            ex << errinfo_transactionIndex(i);
+            _tq.drop(tr.sha3());  
+            throw;
+        }
+        catch (std::exception& ex)
+        {
+	    LOG(ERROR)<<"execute t="<<toString(tr.sha3())<<" failed, error message:"<<ex.what();
+            _tq.drop(tr.sha3());  
+            throw;
+        }
+        LOG(TRACE) << "Block::exec: t=" << toString(tr.sha3());
+        LOG(TRACE) << "Block::exec: stateRoot=" << toString(m_receipts.back().stateRoot()) << ",gasUsed=" << toString(m_receipts.back().gasUsed()) << ",sha3=" << toString(sha3(m_receipts.back().rlp()));
+
+        RLPStream receiptRLP;
+        m_receipts.back().streamRLP(receiptRLP);
+        ret.push_back(m_receipts.back());
+        ++i;
+    }
+
+    return ret;
+}
+
+void Block::onUTXOTxQueueReady() 
+{
+    m_onParallelTxQueueReady = true; 
+    m_signalled.notify_all(); 
+    LOG(TRACE) << "Block::onUTXOTxQueueReady";
+}
+
+void Block::StartWaitingForResult(size_t parallelUTXOTxCnt)
+{
+    if (parallelUTXOTxCnt > 0 && 
+        !m_onParallelTxQueueReady) 
+    { 
+        unique_lock<Mutex> l(x_queue);
+		m_signalled.wait(l);
+    }
+}
+
+TransactionReceipts Block::execUTXOInBlock(BlockChain const& _bc, TransactionQueue& _tq, const LastHashes& lh, std::map<h256, bool>& parallelUTXOTx, size_t parallelUTXOTxCnt)
+{
+    // TRANSACTIONS
+    TransactionReceipts ret;
+    
+    unsigned i = 0;                                                         // 传入的交易队列中的计数索引
+    UTXOModel::UTXOTxQueue utxoTxQueue(parallelUTXOTxCnt, &m_utxoMgr);
+    m_onParallelTxQueueReady = false;
+    m_parallelEnd = utxoTxQueue.onReady([ = ]() { this->onUTXOTxQueueReady(); });
+    m_utxoMgr.setCurBlockInfo(this, lh);
+    m_state.setParallelUTXOTx(parallelUTXOTx);
+    LOG(TRACE) << "Block::exec parallelUTXOTxCnt:" << parallelUTXOTxCnt;
+    DEV_TIMED_ABOVE("Block::exec txExec,blk=" + toString(info().number()) + ",txs=" + toString(m_transactions.size()) + " ", 1)
+    for (Transaction const& tr : m_transactions)
+    {
+        try
+        {
+            LOG(TRACE) << "Block::exec transaction: " << tr.randomid() << tr.from() /*<< state().transactionsFrom(tr.from()) */ << tr.value() << toString(tr.sha3());
+            if (parallelUTXOTx[tr.sha3()])
+            {
+                utxoTxQueue.enqueue(tr);
+            }
             execute(lh, tr, Permanence::OnlyReceipt, OnOpFunc(), &_bc);
         }
         catch (Exception& ex)
@@ -521,7 +608,24 @@ TransactionReceipts Block::exec(BlockChain const& _bc, TransactionQueue& _tq)
         ret.push_back(m_receipts.back());
         ++i;
     }
-
+    LOG(TRACE) << "Block::exec ParallelTxQueueReady:" << m_onParallelTxQueueReady;
+    StartWaitingForResult(parallelUTXOTxCnt);
+    LOG(TRACE) << "Block::exec parallelTx end";
+    map<h256, UTXOModel::UTXOExecuteState> mapTxResult = utxoTxQueue.getTxResult();
+    for (auto const& t : m_transactions)
+    {
+        h256 hash = t.sha3();
+        if (parallelUTXOTx[hash])
+        {
+            if (!mapTxResult.count(hash) || 
+                UTXOModel::UTXOExecuteState::Success != mapTxResult[hash])
+            {
+                LOG(TRACE) << hash << " Transaction Error, drop";
+                _tq.drop(hash);
+                BOOST_THROW_EXCEPTION(UTXOTxError());
+            }
+        }
+    }
     return ret;
 }
 
@@ -556,9 +660,8 @@ u256 Block::enactOn(VerifiedBlockRef const& _block, BlockChain const& _bc, bool 
     t.restart();
 #endif
 
-    //内存中同步当前块 设置previousblock为当前block，并重置当前块
-    //？？这里设置m_previousBlock=currentblock  问题1 对应下面的问题2
     sync(_bc, _block.info.parentHash(), BlockHeader());
+    LOG(TRACE) << "Block::resetCurrent() number:" << biParent.number();
     resetCurrent();
 
 #if ETH_TIMED_ENACTMENTS
@@ -566,9 +669,8 @@ u256 Block::enactOn(VerifiedBlockRef const& _block, BlockChain const& _bc, bool 
     t.restart();
 #endif
 
-    //??问题2 重新设置m_previousBlock为 之前的父block
     m_previousBlock = biParent;
-    auto ret = enact(_block, _bc, true, _statusCheck); //执行块里面所有的交易 要检查权限
+    auto ret = enact(_block, _bc, true, _statusCheck); 
 
 #if ETH_TIMED_ENACTMENTS
     enactment = t.elapsed();
@@ -598,9 +700,6 @@ u256 Block::enact(VerifiedBlockRef const& _block, BlockChain const& _bc, bool _f
     m_currentBlock.noteDirty();
     m_currentBlock = _block.info;
 
-//  LOG(INFO) << "playback begins:" << m_currentBlock.hash() << "(without: " << m_currentBlock.hash(WithoutSeal) << ")";
-//  LOG(INFO) << m_state;
-
     LastHashes lh;
     DEV_TIMED_ABOVE("lastHashes", 500)
     lh = _bc.lastHashes(m_currentBlock.parentHash());
@@ -611,33 +710,95 @@ u256 Block::enact(VerifiedBlockRef const& _block, BlockChain const& _bc, bool _f
 
     LOG(TRACE) << "Block:enact tx_num=" << _block.transactions.size();
     // All ok with the block generally. Play back the transactions now...
-    unsigned i = 0;
-    DEV_TIMED_ABOVE("txExec,blk=" + toString(_block.info.number()) + ",txs=" + toString(_block.transactions.size()), 500)
-    for (Transaction const& tr : _block.transactions)
+    m_utxoMgr.setCurBlockInfo(this, lh);
+    
+    std::map<h256, bool> parallelUTXOTx;
+    size_t parallelUTXOTxCnt = 0;
+    getParallelUTXOTx(_block.transactions, parallelUTXOTx, parallelUTXOTxCnt);
+    if (parallelUTXOTxCnt > 0)
     {
-        try
+        m_state.setParallelUTXOTx(parallelUTXOTx);
+        LOG(TRACE) << "Block::enact parallelUTXOTxCnt:" << parallelUTXOTxCnt;
+        unsigned i = 0;
+        UTXOModel::UTXOTxQueue utxoTxQueue(parallelUTXOTxCnt, &m_utxoMgr);
+        m_onParallelTxQueueReady = false;
+        m_parallelEnd = utxoTxQueue.onReady([ = ]() { this->onUTXOTxQueueReady(); });
+        DEV_TIMED_ABOVE("Block::enact txExec,blk=" + toString(_block.info.number()) + ",txs=" + toString(_block.transactions.size()) + " ", 1)
+        for (Transaction const& tr : _block.transactions)
         {
-            LOG(TRACE) << "Enacting transaction: " << tr.randomid() << tr.from() /*<< state().transactionsFrom(tr.from()) */ << tr.value() << toString(tr.sha3());
-            // 区分从enactOn和populateFromChain
-            execute(lh, tr, Permanence::Committed, OnOpFunc(), (_filtercheck ? (&_bc) : nullptr));
+            try
+            {
+                LOG(TRACE) << "Enacting transaction: " << tr.randomid() << tr.from() /*<< state().transactionsFrom(tr.from()) */ << tr.value() << toString(tr.sha3());
+                if (parallelUTXOTx[tr.sha3()])
+                {
+                    utxoTxQueue.enqueue(tr);
+                }
+                // 区分从enactOn和populateFromChain
+                execute(lh, tr, Permanence::Committed, OnOpFunc(), (_filtercheck ? (&_bc) : nullptr));
 
-            //LOG(TRACE) << "Now: " << tr.from() << state().transactionsFrom(tr.from());
-            //LOG(TRACE) << m_state;
+                //LOG(TRACE) << "Now: " << tr.from() << state().transactionsFrom(tr.from());
+                //LOG(TRACE) << m_state;
+            }
+            catch (Exception& ex)
+            {
+                ex << errinfo_transactionIndex(i);
+                throw;
+            }
+
+            LOG(TRACE) << "Block::enact: t=" << toString(tr.sha3());
+            LOG(TRACE) << "Block::enact: stateRoot=" << toString(m_receipts.back().stateRoot()) << ",gasUsed=" << toString(m_receipts.back().gasUsed()) << ",sha3=" << toString(sha3(m_receipts.back().rlp()));
+
+            RLPStream receiptRLP;
+            m_receipts.back().streamRLP(receiptRLP);
+            receipts.push_back(receiptRLP.out());
+            ++i;
         }
-        catch (Exception& ex)
+        StartWaitingForResult(parallelUTXOTxCnt);
+        map<h256, UTXOModel::UTXOExecuteState> mapTxResult = utxoTxQueue.getTxResult();
+        LOG(TRACE) << "Block::enact parallelTx end";
+        for (auto const& t : _block.transactions)
         {
-
-            ex << errinfo_transactionIndex(i);
-            throw;
+            h256 hash = t.sha3();
+            if (parallelUTXOTx[hash])
+            {
+                if (!mapTxResult.count(hash) || 
+                    UTXOModel::UTXOExecuteState::Success != mapTxResult[hash])
+                {
+                    LOG(TRACE) << hash << " Transaction Error";
+                    BOOST_THROW_EXCEPTION(UTXOTxError());
+                }
+            }
         }
+    }
+    else
+    {
+        unsigned i = 0;
+        DEV_TIMED_ABOVE("Block::enact txExec,blk=" + toString(_block.info.number()) + ",txs=" + toString(_block.transactions.size()) + " ", 1)
+        for (Transaction const& tr : _block.transactions)
+        {
+            try
+            {
+                LOG(TRACE) << "Enacting transaction: " << tr.randomid() << tr.from() /*<< state().transactionsFrom(tr.from()) */ << tr.value() << toString(tr.sha3());
+                // 区分从enactOn和populateFromChain
+                execute(lh, tr, Permanence::Committed, OnOpFunc(), (_filtercheck ? (&_bc) : nullptr));
 
-        LOG(TRACE) << "Block::enact: t=" << toString(tr.sha3());
-        LOG(TRACE) << "Block::enact: stateRoot=" << toString(m_receipts.back().stateRoot()) << ",gasUsed=" << toString(m_receipts.back().gasUsed()) << ",sha3=" << toString(sha3(m_receipts.back().rlp()));
+                //LOG(TRACE) << "Now: " << tr.from() << state().transactionsFrom(tr.from());
+                //LOG(TRACE) << m_state;
+            }
+            catch (Exception& ex)
+            {
+                ex << errinfo_transactionIndex(i);
+                throw;
+            }
 
-        RLPStream receiptRLP;
-        m_receipts.back().streamRLP(receiptRLP);
-        receipts.push_back(receiptRLP.out());
-        ++i;
+            LOG(TRACE) << "Block::enact: t=" << toString(tr.sha3());
+            LOG(TRACE) << "Block::enact: stateRoot=" << toString(m_receipts.back().stateRoot()) << ",gasUsed=" << toString(m_receipts.back().gasUsed()) << ",sha3=" << toString(sha3(m_receipts.back().rlp()));
+
+            RLPStream receiptRLP;
+            m_receipts.back().streamRLP(receiptRLP);
+            receipts.push_back(receiptRLP.out());
+            ++i;
+        }
     }
 
     h256 receiptsRoot;
@@ -759,13 +920,6 @@ u256 Block::enact(VerifiedBlockRef const& _block, BlockChain const& _bc, bool _f
         }
     }
 
-    //不要奖励了
-    //DEV_TIMED_ABOVE("applyRewards", 500)
-    //applyRewards(rewarded, _bc.chainParams().blockReward);
-
-    // Commit all cached state changes to the state trie.
-    //bool removeEmptyAccounts = m_currentBlock.number() >= _bc.chainParams().u256Param("EIP158ForkBlock");
-
     DEV_TIMED_ABOVE("commit", 500)
     m_state.commit( State::CommitBehaviour::KeepEmptyAccounts);
 
@@ -792,7 +946,7 @@ u256 Block::enact(VerifiedBlockRef const& _block, BlockChain const& _bc, bool _f
 // will throw exception
 ExecutionResult Block::execute(LastHashes const& _lh, Transaction const& _t, Permanence _p, OnOpFunc const& _onOp, BlockChain const *_bcp)
 {
-    LOG(TRACE) << "Block::execute " << _t.sha3();
+    LOG(TRACE) << "Block::execute " << _t.sha3() << ",to=" << _t.to() << "permanence=" << (int)_p << "_bcp=" << (_bcp!=nullptr ? "not null" : "is null");
     if (isSealed())
         BOOST_THROW_EXCEPTION(InvalidOperationOnSealedBlock());
 
@@ -810,90 +964,7 @@ ExecutionResult Block::execute(LastHashes const& _lh, Transaction const& _t, Per
         }
     }
 
-    //双VM，线程不安全
-    if (VMFactory::getKind() == VMKind::Dual) {
-        //LOG(DEBUG) << "dual vm execute...";
-        VMFactory::setKind(VMKind::JIT);
-
-        Timer timer;
-        std::pair<ExecutionResult, TransactionReceipt> JITResultReceipt = m_state.execute(EnvInfo(info(), _lh, gasUsed()), *m_sealEngine, _t, Permanence::Dry, _onOp);
-        //LOG(DEBUG) << "jit elapsed:" << timer.elapsed();
-
-        std::unordered_map<Address, Account> JITCache = m_state.getCache();
-        m_state.clearCache();
-
-        VMFactory::setKind(VMKind::Interpreter);
-
-        timer.restart();
-        std::pair<ExecutionResult, TransactionReceipt> interpreterResultReceipt = m_state.execute(EnvInfo(info(), _lh, gasUsed()), *m_sealEngine, _t, _p, _onOp);
-        //LOG(DEBUG) << "interpreter elapsed:" << timer.elapsed();
-
-        std::unordered_map<Address, Account> interpreterCache = m_state.getCache();
-
-        //bool removeEmptyAccounts = info().number() >= m_sealEngine->chainParams().u256Param("EIP158ForkBlock");
-        //m_state.commit(removeEmptyAccounts ? State::CommitBehaviour::RemoveEmptyAccounts : State::CommitBehaviour::KeepEmptyAccounts);
-        m_state.commit(State::CommitBehaviour::KeepEmptyAccounts);
-
-        VMFactory::setKind(VMKind::Dual);
-
-        //比较差异
-        auto lhsResult = interpreterResultReceipt.first;
-        auto rhsResult = JITResultReceipt.first;
-
-        for (auto lhsAccountIt = interpreterCache.begin(); lhsAccountIt != interpreterCache.end(); ++lhsAccountIt) {
-            auto rhsAccountIt = JITCache.find(lhsAccountIt->first);
-
-            if (rhsAccountIt == JITCache.end()) {
-                LOG(WARNING) << "[Dual error]JIT执行缺少Account:" << lhsAccountIt->first;
-            }
-            else {
-                Account &lhs = lhsAccountIt->second;
-                Account &rhs = rhsAccountIt->second;
-
-                if (lhs.nonce() != rhs.nonce() || lhs.balance() != rhs.balance() || lhs.code() != rhs.code()) {
-                    LOG(WARNING) << "[Dual error]JIT Account与Interpreter Account差异:" << lhsAccountIt->first
-                                 << "nonce:" << lhs.nonce() << "," << rhs.nonce()
-                                 << "; balance:" << lhs.balance() << "," << rhs.balance()
-                                 << "; code:" << lhs.code() << "," << rhs.code();
-                }
-
-                auto lhsStorage = lhs.storageOverlay();
-                auto rhsStorage = rhs.storageOverlay();
-
-                for (auto lhsStorageIt = lhsStorage.begin(); lhsStorageIt != lhsStorage.end(); ++lhsStorageIt) {
-                    auto rhsStorageIt = rhsStorage.find(lhsStorageIt->first);
-
-                    if (rhsStorageIt == rhsStorage.end()) {
-                        LOG(WARNING) << "[Dual error]JIT缺少Storage key, Account:" << lhsStorageIt->first << "storage key:" << lhsStorageIt->first;
-                    }
-                    else if (lhsStorageIt->second != rhsStorageIt->second) {
-                        LOG(WARNING) << "[Dual error]JIT storage与Interpreter差异 Account:" << lhsStorageIt->first << "JIT:" << lhsStorageIt->second << "Interpreter:" << rhsStorageIt->second;
-                    }
-                }
-            }
-        }
-
-        if (_p == Permanence::Committed)
-        {
-            // Add to the user-originated transactions that we've executed.
-            m_transactions.push_back(_t);
-            m_receipts.push_back(interpreterResultReceipt.second);
-            m_transactionSet.insert(_t.sha3());
-
-
-            //更新系统缓存
-            if (_bcp) {
-                (_bcp->updateCache)(_t.to());
-            }
-
-        }
-
-        return interpreterResultReceipt.first;
-    }
-
-    //初始化环境EnvInfo 每次执行交易都会初始化环境，
-
-    std::pair<ExecutionResult, TransactionReceipt> resultReceipt = m_state.execute(EnvInfo(info(), _lh, gasUsed(), m_evmCoverLog, m_evmEventLog), *m_sealEngine, _t, _p, _onOp);
+    std::pair<ExecutionResult, TransactionReceipt> resultReceipt = m_state.execute(EnvInfo(info(), _lh, gasUsed(), m_evmCoverLog, m_evmEventLog), *m_sealEngine, _t, _p, _onOp, &m_utxoMgr);
 
     if (_p == Permanence::Committed)
     {
@@ -910,7 +981,7 @@ ExecutionResult Block::execute(LastHashes const& _lh, Transaction const& _t, Per
         }
 
     }
-    // 交易已经同步到m_transactions，这里只需要保存receipt
+   
     if (_p == Permanence::OnlyReceipt)
     {
         m_receipts.push_back(resultReceipt.second);
@@ -920,7 +991,22 @@ ExecutionResult Block::execute(LastHashes const& _lh, Transaction const& _t, Per
     return resultReceipt.first;
 }
 
-// 不要奖励了
+ExecutionResult Block::executeByUTXO(LastHashes const& _lh, Transaction const& _t, Permanence _p, OnOpFunc const& _onOp)
+{
+    LOG(TRACE) << "Block::executeByUTXO " << _t.sha3();
+    if (isSealed())
+        BOOST_THROW_EXCEPTION(InvalidOperationOnSealedBlock());
+
+    // Uncommitting is a non-trivial operation - only do it once we've verified as much of the
+    // transaction as possible.
+    uncommitToSeal();
+
+    //初始化环境EnvInfo 每次执行交易都会初始化环境，
+    std::pair<ExecutionResult, TransactionReceipt> resultReceipt = m_state.execute(EnvInfo(info(), _lh, gasUsed(), m_evmCoverLog, m_evmEventLog), *m_sealEngine, _t, _p, _onOp, &m_utxoMgr);
+
+    return resultReceipt.first;
+}
+
 void Block::applyRewards(vector<BlockHeader> const& _uncleBlockHeaders, u256 const& _blockReward)
 {
     return ;
@@ -965,7 +1051,7 @@ void Block::commitToSeal(BlockChain const& _bc, bytes const& _extraData)
     if (m_previousBlock.number() != 0)
     {
         // Find great-uncles (or second-cousins or whatever they are) - children of great-grandparents, great-great-grandparents... that were not already uncles in previous generations.
-        LOG(INFO) << "Checking " << m_previousBlock.hash() << ", parent=" << m_previousBlock.parentHash();
+        LOG(TRACE) << "Checking " << m_previousBlock.hash() << ", parent=" << m_previousBlock.parentHash();
         h256Hash excluded = _bc.allKinFrom(m_currentBlock.parentHash(), 6);
         auto p = m_previousBlock.parentHash();
         for (unsigned gen = 0; gen < 6 && p != _bc.genesisHash() && unclesCount < 2; ++gen, p = _bc.details(p).parent)
@@ -996,8 +1082,8 @@ void Block::commitToSeal(BlockChain const& _bc, bytes const& _extraData)
         RLPStream k;
         k << i;
 
-        if (m_receipts.size() > i) { // 并行PBFT第一次打包没有receipt
-            RLPStream receiptrlp;
+        if (m_receipts.size() > i) { // parallel Pbft first time pack transction has not receipt
+            RLPStream receiptrlp; 
             m_receipts[i].streamRLP(receiptrlp);
             receiptsMap.insert(std::make_pair(k.out(), receiptrlp.out()));
         }
@@ -1021,24 +1107,24 @@ void Block::commitToSeal(BlockChain const& _bc, bytes const& _extraData)
     RLPStream(unclesCount).appendRaw(unclesData.out(), unclesCount).swapOut(m_currentUncles);
 
 
-
-    // Apply rewards last of all.  不要奖励了
-    //applyRewards(uncleBlockHeaders, _bc.chainParams().blockReward);
-
-    // Commit any and all changes to the trie that are in the cache, then update the state root accordingly.
-    //bool removeEmptyAccounts = m_currentBlock.number() >= _bc.chainParams().u256Param("EIP158ForkBlock");
-
-
     DEV_TIMED_ABOVE("commit", 500)
     m_state.commit(State::CommitBehaviour::KeepEmptyAccounts);// 不要RemoveEmptyAccounts了
-
-    //LOG(INFO) << "Post-reward stateRoot:" << m_state.rootHash();
-    //LOG(INFO) << m_state;
-    //LOG(INFO) << *this;
 
     m_currentBlock.setLogBloom(logBloom());
     m_currentBlock.setGasUsed(gasUsed());
     m_currentBlock.setRoots(hash256(transactionsMap), hash256(receiptsMap), sha3(m_currentUncles), m_state.rootHash());
+    LOG(TRACE) << "Block::commitToSeal() number:" << m_currentBlock.number();
+    h256 UTXOHash = m_utxoMgr.getHash();
+    h256s hashList = m_currentBlock.hashList();
+    if (hashList.size() == 0)
+    {
+        hashList.push_back(UTXOHash);
+    }
+    else if (hashList.size() >= 1)
+    {
+        hashList[0] = UTXOHash;
+    }
+    m_currentBlock.setHashList(hashList);
 
     m_currentBlock.setParentHash(m_previousBlock.hash());
     m_currentBlock.setExtraData(_extraData);
@@ -1073,6 +1159,18 @@ void Block::commitToSealAfterExecTx(BlockChain const&) {
     m_currentBlock.setLogBloom(logBloom());
     m_currentBlock.setGasUsed(gasUsed());
     m_currentBlock.setRoots(m_currentBlock.transactionsRoot(), hash256(receiptsMap), m_currentBlock.sha3Uncles(), m_state.rootHash());
+    LOG(TRACE) << "Block::commitToSealAfterExecTx() number:" << m_currentBlock.number();
+    h256 UTXOHash = m_utxoMgr.getHash();
+    h256s hashList = m_currentBlock.hashList();
+    if (hashList.size() == 0)
+    {
+        hashList.push_back(UTXOHash);
+    }
+    else if (hashList.size() >= 1)
+    {
+        hashList[0] = UTXOHash;
+    }
+    m_currentBlock.setHashList(hashList);
 
     m_committedToSeal = true;
 }
@@ -1088,29 +1186,7 @@ void Block::uncommitToSeal()
 
 bool Block::sealBlock(bytesConstRef _header)
 {
-    /*    if (!m_committedToSeal)
-            return false;
-
-        if (BlockHeader(_header, HeaderData).hash(WithoutSeal) != m_currentBlock.hash(WithoutSeal))
-            return false;
-
-        LOG(INFO) << "Sealing block!";
-
-        // Compile block:
-        RLPStream ret;
-        ret.appendList(5);
-        ret.appendRaw(_header);
-        ret.appendRaw(m_currentTxs);
-        ret.appendRaw(m_currentUncles);
-        /// 增加一条冗余信息，为了跟header建立联系，方便下载时处理
-        ret.append(m_currentBlock.hash(WithoutSeal));
-        /// 增加签名
-        std::vector<std::pair<u256, Signature>> sig_list;
-        ret.appendVector(sig_list);
-
-
-        ret.swapOut(m_currentBytes);
-    */
+    
     if (!sealBlock(_header, m_currentBytes)) {
         return false;
     }
@@ -1146,9 +1222,9 @@ bool Block::sealBlock(bytesConstRef _header, bytes & _out)
     ret.appendRaw(_header);
     ret.appendRaw(m_currentTxs);
     ret.appendRaw(m_currentUncles);
-    /// 增加一条冗余信息，为了跟header建立联系，方便下载时处理
+    
     ret.append(m_currentBlock.hash(WithoutSeal));
-    /// 增加签名
+   
     std::vector<std::pair<u256, Signature>> sig_list;
     ret.appendVector(sig_list);
 
@@ -1217,6 +1293,8 @@ void Block::cleanup(bool _fullCommit)
 void Block::commitAll() {
     // Commit the new trie to disk.
     LOG(TRACE) << "Committing to disk: stateRoot" << m_currentBlock.stateRoot() << "=" << rootHash() << "=" << toHex(asBytes(db().lookup(rootHash())));
+    LOG(TRACE) << "Block::commitAll() number:" << m_currentBlock.number();
+    m_utxoMgr.commitDB();
 
     try
     {
@@ -1269,6 +1347,40 @@ string Block::vmTrace(bytesConstRef _block, BlockChain const& _bc, ImportRequire
         ++i;
     }
     return ret.empty() ? "[]" : (ret + "]");
+}
+
+void Block::getParallelUTXOTx(const Transactions& transactions, std::map<h256, bool>& ret, size_t& cnt)
+{
+    std::vector<bool> artificialTx;
+    isArtificialTx(transactions, artificialTx);
+    for (size_t i = 0; i < transactions.size(); i++)
+    {
+        const Transaction& tr = transactions[i];
+        bool temp = (tr.getUTXOType() != UTXOType::InValid && !tr.isUTXOEvmTx() && !artificialTx[i]);
+        ret[tr.sha3()] = temp;
+        if (temp) { cnt++; }
+    }
+}
+
+void Block::isArtificialTx(const Transactions& txList, std::vector<bool>& flag)
+{
+    std::vector<bool> tmp(txList.size(), false);
+    flag = tmp;
+
+    std::map<string, size_t> tokenKeyMap;
+    for (size_t txIdx = 0; txIdx < txList.size(); txIdx++)
+    {
+        std::vector<UTXOModel::UTXOTxIn> inList = txList[txIdx].getUTXOTxIn();
+        for(const UTXOModel::UTXOTxIn& in : inList)
+        {
+            if (tokenKeyMap.count(in.tokenKey))
+            {
+                flag[txIdx] = true;
+                flag[tokenKeyMap[in.tokenKey]] = true;
+            }
+            tokenKeyMap[in.tokenKey] = txIdx;
+        }
+    }
 }
 
 std::ostream& dev::eth::operator<<(std::ostream& _out, Block const& _s)

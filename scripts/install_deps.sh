@@ -144,6 +144,7 @@ Linux)
     elif [ -f "/etc/os-release" ]; then
 
         DISTRO_NAME=$(. /etc/os-release; echo $NAME)
+	echo "Linux distribution: $DISTRO_NAME."
         case $DISTRO_NAME in
 
         Debian*)
@@ -157,7 +158,8 @@ Linux)
                 libgmp-dev \
                 libleveldb-dev \
                 libmicrohttpd-dev \
-                libminiupnpc-dev
+                libminiupnpc-dev \
+                uuid-dev
             ;;
 
         Fedora)
@@ -168,7 +170,8 @@ Linux)
                 leveldb-devel \
                 curl-devel \
                 libmicrohttpd-devel \
-                gmp-devel
+                gmp-devel \
+                libuuid-devel
             ;;
 
 #------------------------------------------------------------------------------
@@ -202,6 +205,7 @@ Linux)
                 libleveldb-dev \
                 libmicrohttpd-dev \
                 libminiupnpc-dev \
+                uuid-dev \
                 $LLVM_PACKAGES
             ;;
 
@@ -217,7 +221,24 @@ Linux)
                 curl-devel \
                 libmicrohttpd-devel \
                 gmp-devel \
-                openssl openssl-devel
+                openssl openssl-devel \
+                libuuid-devel
+            ;;
+	#add Oracle Linux Server dependencies
+	Oracle*)
+            echo "Installing cpp-ethereum dependencies on Oracle Linux Server."
+            # Enable EPEL repo that contains leveldb-devel
+            $SUDO yum -y -q install epel-release
+            $SUDO yum -y -q install \
+                make \
+                gcc-c++ \
+                boost-devel \
+                leveldb-devel \
+                curl-devel \
+                libmicrohttpd-devel \
+                gmp-devel \
+                openssl openssl-devel \
+                libuuid-devel
             ;;
 
         *)

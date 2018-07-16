@@ -25,13 +25,15 @@
 
 #include <memory>
 #include <iostream>
+
 #include <jsonrpccpp/server.h>
 #include <jsonrpccpp/common/exception.h>
 #include <libdevcrypto/Common.h>
 #include <libethereum/Client.h>
-#include "SessionManager.h"
-#include "EthFace.h"
+#include <UTXO/UTXOData.h>
 
+#include "EthFace.h"
+#include "SessionManager.h"
 
 namespace dev
 {
@@ -140,6 +142,27 @@ public:
 
 	virtual std::string eth_unverifiedTransactionsQueueSize()override;
 	virtual std::string eth_verifiedTransactionsQueueSize()override;
+
+	bool isDefaultCall(const TransactionSkeleton &t, CnsParams &params, const Json::Value &_json);
+	bool isOldCNSCall(const TransactionSkeleton &t, CnsParams &params ,const Json::Value &_json);
+	bool isNewCNSCall(const TransactionSkeleton &t);
+
+	void eth_sendTransactionOldCNSSetParams(TransactionSkeleton &t);
+	void eth_sendTransactionNewCNSSetParams(TransactionSkeleton &t);
+
+	std::string eth_callDefault(TransactionSkeleton &t, std::string const& _blockNumber);
+	std::string eth_callOldCNS(TransactionSkeleton &t,const CnsParams &params,std::string const& _blockNumber);
+	std::string eth_callNewCNS(TransactionSkeleton &t, std::string const& _blockNumber);
+
+	//CNS
+	virtual std::string eth_getCodeCNS(std::string const& strContractName, std::string const& _blockNumber) override;
+	virtual std::string eth_getBalanceCNS(std::string const& strContractName, std::string const& _blockNumber) override;
+	virtual std::string eth_getStorageAtCNS(std::string const& strContractName, std::string const& _position, std::string const& _blockNumber) override;
+	virtual std::string eth_getTransactionCountCNS(std::string const& strContractName, std::string const& _blockNumber) override;
+
+	//ZKG
+	virtual Json::Value eth_getCmByRange(Json::Value const& range) override;
+	virtual Json::Value eth_getGovDataByRange(Json::Value const& range) override;
 protected:
 
 	eth::Interface* client() { return &m_eth; }
@@ -147,6 +170,18 @@ protected:
 	eth::Interface& m_eth;
 	eth::AccountHolder& m_ethAccounts;
 
+	bool isUTXOTx(Json::Value const& _json);
+	string utxoCall(Json::Value const& _json);
+	bool getAccount(Json::Value const& utxoData, dev::Address& account, std::string& ret);
+	bool getValue(Json::Value const& utxoData, dev::u256& value, std::string& ret);
+	UTXOModel::QueryUTXOParam getQueryParam(Json::Value const& utxoData);
+	string utxo_call_registerAccount(Json::Value const& utxoData);
+	string utxo_call_getToken(Json::Value const& utxoData);
+	string utxo_call_getTx(Json::Value const& utxoData);
+	string utxo_call_getVault(Json::Value const& utxoData);
+	string utxo_call_tokenTracking(Json::Value const& utxoData);
+	string utxo_call_selectTokens(Json::Value const& utxoData);
+	string utxo_call_getBalance(Json::Value const& utxoData);
 };
 
 }

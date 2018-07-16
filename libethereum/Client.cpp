@@ -17,25 +17,30 @@
 /** @file Client.cpp
  * @author Gav Wood <i@gavwood.com>
  * @date 2014
+ * @author: toxotguo
+ * @date: 2018
  */
 
-#include "Client.h"
+#include <boost/filesystem.hpp>
 #include <chrono>
 #include <memory>
 #include <thread>
-#include <boost/filesystem.hpp>
-#include <libdevcore/easylog.h>
-#include <libp2p/Host.h>
+
 #include <abi/ContractAbiMgr.h>
 #include <libdevcore/easylog.h>
+#include <libp2p/Host.h>
+#include <UTXO/UTXOSharedData.h>
+
+#include "Block.h"
+#include "Client.h"
 #include "Defaults.h"
 #include "Executive.h"
 #include "EthereumHost.h"
-#include "Utility.h"
-#include "Block.h"
 #include "NodeConnParamsManager.h"
-#include "TransactionQueue.h"
 #include "SystemContractApi.h"
+#include "SystemContractApiFactory.h"
+#include "TransactionQueue.h"
+#include "Utility.h"
 
 using namespace std;
 using namespace dev;
@@ -54,7 +59,7 @@ std::ostream& dev::eth::operator<<(std::ostream& _out, ActivityReport const& _r)
 Client::Client(
     ChainParams const& _params,
     int _networkID,
-    p2p::Host* _host,
+    p2p::HostApi* _host,
     std::shared_ptr<GasPricer> _gpForAdoption,
     std::string const& _dbPath,
     WithExisting _forceAction,
@@ -78,31 +83,33 @@ Client::Client(
 
 	LOG(INFO) << "contract abi mgr path=> " << (getDataDir() + "./abi");
 
+	UTXOModel::UTXOSharedData::getInstance()->initialize(getDataDir());
+	LOG(INFO) << "UTXOSharedData->initialize() End";
+
 	//创建系统合约api
 	m_systemcontractapi = SystemContractApiFactory::create(_params.sysytemProxyAddress, _params.god, this);
 
     libabi::ContractAbiMgr::getInstance()->setSystemContract();
-	//上帝模式
+	
 	if(_params.godMinerStart> 0  )
 	{
 		if ( _params.godMinerStart != bc().number() + 1 )
 		{
-			LOG(WARNING) << "当前区块链高度不符合上帝模式配置，请检查上帝模式配置！blockchain.number=" << bc().number() << ",godMinerStart=" << _params.godMinerStart;
+			LOG(WARNING) << "Current Height Don't Match Config. Please Check Config！blockchain.number=" << bc().number() << ",godMinerStart=" << _params.godMinerStart;
 			exit(-1);
 		}
 	}
-	NodeConnManagerSingleton::GetInstance().setChainParams(_params);
-	NodeConnManagerSingleton::GetInstance().setInitIdentityNodes(_params);
+	
+	NodeConnManagerSingleton::GetInstance().setInitInfo(_params);
 	NodeConnManagerSingleton::GetInstance().SetHost(_host);
 
 	updateConfig();
-	//注册回调
+	
 	m_systemcontractapi->addCBOn("config", [ this ](string) {
-		//回调	 全网配置更新
+		
 		updateConfig();
 	});
 
-	//必须放在后面，里面用到的变量修改后才可见
 	NodeConnManagerSingleton::GetInstance().setSysContractApi(m_systemcontractapi);
 }
 
@@ -131,6 +138,11 @@ void Client::updateConfig() {
 	if ( uvalue < 2000000000 )
 		uvalue = 2000000000;
 	BlockHeader::maxBlockHeadGas = uvalue;
+
+	value = "";
+	m_systemcontractapi->getValue("updateHeight", value);
+	uvalue = u256(fromBigEndian<u256>(fromHex(value)));
+	BlockHeader::updateHeight = uvalue;
 
 	value = "";
 	m_systemcontractapi->getValue("maxTranscationGas", value);
@@ -199,16 +211,13 @@ void Client::updateCache(Address address) {
 	m_systemcontractapi->updateCache(address);
 }
 
-void Client::startStatTranscation(h256 t) {
-	m_systemcontractapi->startStatTranscation(t);
-}
 
 Client::~Client()
 {
 	stopWorking();
 }
 
-void Client::init(p2p::Host* _extNet, std::string const& _dbPath, WithExisting _forceAction, u256 _networkId)
+void Client::init(p2p::HostApi* _extNet, std::string const& _dbPath, WithExisting _forceAction, u256 _networkId)
 {
 	DEV_TIMED_FUNCTION_ABOVE(500);
 
@@ -239,7 +248,6 @@ void Client::init(p2p::Host* _extNet, std::string const& _dbPath, WithExisting _
 
 	m_gp->update(bc());
 
-	//注册协议
 	auto host = _extNet->registerCapability(make_shared<EthereumHost>(bc(), m_stateDB, m_tq, m_bq, _networkId));
 	m_host = host;
 	_extNet->addCapability(host, EthereumHost::staticName(), EthereumHost::c_oldProtocolVersion); //TODO: remove this once v61+ protocol is common
@@ -1018,7 +1026,6 @@ int Client::getResultInt(ExecutionResult& result, int& value)
 		return -1;
 	}
 
-	//LOG(TRACE)  << "the result size:" << result.output.size() << ",data: " << result.output;
 	value = fromBigEndian<u256>(bytes(result.output.begin(), result.output.begin() + 32)).convert_to<size_t>();
 	return 0;
 }
@@ -1027,4 +1034,10 @@ int Client::getResultInt(ExecutionResult& result, int& value)
 Address Client::findContract(const string& contract)
 {
 	return m_systemcontractapi->getRoute(contract);
+}
+
+UTXOModel::UTXOMgr* Client::getUTXOMgr() 
+{
+	LOG(TRACE) << "Client::getUTXOMgr()";
+	return &m_utxoMgr; 
 }

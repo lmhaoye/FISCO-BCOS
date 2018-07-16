@@ -74,11 +74,15 @@ protected:
 			m_events.clear();
 		}
 		for (auto const& e: events)
+		{
 			processEvent(e.first, e.second);
+		}
+			
 	}
 
 	/// Called by NodeTable to append event.
-	virtual void appendEvent(NodeID _n, NodeTableEventType _e) { Guard l(x_events); m_nodeEventHandler.push_back(_n); m_events[_n] = _e; }
+	virtual void appendEvent(NodeID _n, NodeTableEventType _e) { 
+		Guard l(x_events); m_nodeEventHandler.push_back(_n); m_events[_n] = _e; }
 
 	Mutex x_events;
 	std::list<NodeID> m_nodeEventHandler;
@@ -176,7 +180,7 @@ private:
 
 	/// Chosen constants
 
-	static unsigned const s_bucketSize = 16;			///< Denoted by k in [Kademlia]. Number of nodes stored in each bucket.
+	static unsigned const s_bucketSize;			///< Denoted by k in [Kademlia]. Number of nodes stored in each bucket.
 	static unsigned const s_alpha = 3;				///< Denoted by \alpha in [Kademlia]. Number of concurrent FindNode requests.
 
 	/// Intervals

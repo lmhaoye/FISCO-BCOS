@@ -19,12 +19,15 @@
  * @date 2014
  */
 
-#include "TransactionQueue.h"
 #include <libdevcore/easylog.h>
 #include <libethcore/Exceptions.h>
+#include <UTXO/UTXOSharedData.h>
+
 #include "Transaction.h"
+#include "TransactionQueue.h"
 #include "StatLog.h"
 #include "SystemContractApi.h"
+
 using namespace std;
 using namespace dev;
 using namespace dev::eth;
@@ -78,12 +81,11 @@ std::pair<ImportResult, h256> TransactionQueue::import(bytesConstRef _transactio
 			// If it doesn't work, the signature is bad.
 			// The transaction's nonce may yet be invalid (or, it could be "valid" but we may be missing a marginally older transaction).
 			//LOG(TRACE)<<"TransactionQueue::import befor check ";
-			m_interface->startStatTranscation(h);
 
 			t = Transaction(_transactionRLP, CheckTransaction::Everything);
-			if (t.bNameCall())
-			{	//这里仅仅是检查根据调用的name能否找见对应的abi信息，找不见则抛出异常
-				t.addrAnddata();
+			if (t.isCNS())
+			{
+				t.receiveAddress();
 			}
 
 			t.setImportTime(utcTime());
@@ -127,7 +129,6 @@ ImportResult TransactionQueue::import(Transaction const& _transaction, IfDropped
 
 		{
 			_transaction.safeSender(); // Perform EC recovery outside of the write lock
-			m_interface->startStatTranscation(h);
 			UpgradeGuard ul(l);
 			ret = manageImport_WITH_LOCK(h, _transaction);
 		}
@@ -174,7 +175,6 @@ ImportResult TransactionQueue::manageImport_WITH_LOCK(h256 const& _h, Transactio
 	{
 		assert(_h == _transaction.sha3());
 
-		//回调client noncecheck类 检查nonce 这里判断是，nonce是否在chain上已经出现过
 		if ( false == m_interface->isNonceOk(_transaction))
 		{
 
@@ -187,10 +187,10 @@ ImportResult TransactionQueue::manageImport_WITH_LOCK(h256 const& _h, Transactio
 			LOG(WARNING) << "TransactionQueue::manageImport_WITH_LOCK BlockLimit fail! " << _transaction.sha3() << "," << _transaction.blockLimit();
 			return ImportResult::BlockLimitCheckFail;
 		}
-		// 权限判断逻辑
+		
 		if( _transaction.isCreation())
 		{
-			// 部署合约
+			
 			u256 ret = m_interface->filterCheck(_transaction,FilterCheckScene::CheckDeploy);
 			if( (u256)SystemContractCode::Ok != ret)
 			{
@@ -199,13 +199,84 @@ ImportResult TransactionQueue::manageImport_WITH_LOCK(h256 const& _h, Transactio
 			}
 		}
 		else {
-			// 合约调用
+			
 			u256 ret = m_interface->filterCheck(_transaction,FilterCheckScene::CheckTx);
 			LOG(TRACE)<<"TransactionQueue::manageImport_WITH_LOCK FilterCheckScene::CheckTx ";
 			if( (u256)SystemContractCode::Ok != ret)
 			{
 				LOG(TRACE)<<"TransactionQueue::manageImport_WITH_LOCK hasTxPermission fail! "<<_transaction.sha3();
 				return ImportResult::NoTxPermission;
+			}
+		}
+
+		// check before import
+		{
+			try
+			{
+				UTXOType utxoType = _transaction.getUTXOType();
+				u256 curBlockNum = UTXOModel::UTXOSharedData::getInstance()->getBlockNum();
+				LOG(TRACE) << "TransactionQueue::manageImport_WITH_LOCK utxoType:" << utxoType << ",curBlock:" << curBlockNum << ",updateHeight:" << BlockHeader::updateHeight;
+				if (UTXOType::InitTokens == utxoType || 
+					UTXOType::SendSelectedTokens == utxoType) 
+				{
+					if (0 == BlockHeader::updateHeight || 
+						curBlockNum <= BlockHeader::updateHeight)
+					{
+						UTXO_EXCEPTION_THROW("TransactionQueue::manageImport_WITH_LOCK Error:LowEthVersion", UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrLowEthVersion);
+						LOG(ERROR) << "TransactionQueue::manageImport_WITH_LOCK Error:" << UTXOModel::UTXOExecuteState::LowEthVersion;
+					}
+					_transaction.checkUTXOTransaction(m_interface->getUTXOMgr());
+				}
+				else if (utxoType != UTXOType::InValid)
+				{
+					UTXO_EXCEPTION_THROW("TransactionQueue::manageImport_WITH_LOCK Error:UTXOTypeInvalid", UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeUTXOTypeInvalid);
+					LOG(ERROR) << "TransactionQueue::manageImport_WITH_LOCK Error:" << UTXOModel::UTXOExecuteState::UTXOTypeInvalid;
+				}
+			}
+			catch (UTXOModel::UTXOException& e)
+			{
+				UTXOModel::EnumUTXOExceptionErrCode code = e.error_code();
+				LOG(ERROR) << "TransactionQueue::manageImport_WITH_LOCK ErrorCode:" << (int)code;
+				if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeUTXOTypeInvalid == code)
+				{
+					return ImportResult::UTXOInvalidType;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeJsonParamError == code)
+				{
+					return ImportResult::UTXOJsonParamError;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeTokenIDInvalid == code)
+				{
+					return ImportResult::UTXOTokenIDInvalid;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeTokenUsed == code)
+				{
+					return ImportResult::UTXOTokenUsed;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeTokenOwnerShipCheckFail == code)
+				{
+					return ImportResult::UTXOTokenOwnerShipCheckFail;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeTokenLogicCheckFail == code)
+				{
+					return ImportResult::UTXOTokenLogicCheckFail;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrCodeTokenAccountingBalanceFail == code)
+				{
+					return ImportResult::UTXOTokenAccountingBalanceFail;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrTokenCntOutofRange == code)
+				{
+					return ImportResult::UTXOTokenCntOutofRange;
+				}
+				else if (UTXOModel::EnumUTXOExceptionErrCode::EnumUTXOExceptionErrLowEthVersion == code)
+				{
+					return ImportResult::UTXOLowEthVersion;
+				}
+				else 
+				{
+					return ImportResult::UTXOTxError;
+				}
 			}
 		}
 
@@ -317,7 +388,9 @@ void TransactionQueue::insertCurrent_WITH_LOCK(std::pair<h256, Transaction> cons
 	makeCurrent_WITH_LOCK(t);
 	m_known.insert(_p.first);
 	// start tx trace log
-	dev::eth::TxFlowLog(_p.first, "0x" + _p.first.hex().substr(0, 5), false, true);	
+	// TODO FLAG 1  "0x" + _p.first.hex().substr(0, 5) => _p.first.hex()
+	// dev::eth::TxFlowLog(_p.first, "0x" + _p.first.hex().substr(0, 5), false, true);	
+	dev::eth::TxFlowLog(_p.first, _p.first.hex(), false, true);
 	LOG(INFO) << " Hash=" << (t.sha3()) << ",Randid=" << t.randomid() << ",入队=" << utcTime();
 }
 
@@ -501,7 +574,7 @@ void TransactionQueue::verifierBody()
 		try
 		{
 			Transaction t(work.transaction, CheckTransaction::Everything); //Signature will be checked later
-			//这里改为这里验证 后面Executive::initialize里面不验证了
+			
 			t.setImportTime(utcTime());
 			t.setImportType(1); // 1 for p2p
 			ImportResult ir = import(t);

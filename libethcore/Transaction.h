@@ -26,6 +26,7 @@
 #include <libdevcore/Guards.h>
 #include <libethcore/Common.h>
 #include <libweb3jsonrpc/JsonHelper.h>
+#include <UTXO/UTXOMgr.h>
 
 namespace dev
 {
@@ -48,11 +49,25 @@ enum class CheckTransaction
 	Everything
 };
 
+enum UTXOType {
+	InValid = 0,				// Invalid
+	InitTokens,					// Coinage
+	SendSelectedTokens,			// Deal
+	RegisterAccount,			// Register account
+	GetToken,					// Get token details
+	GetTx,						// Get UTXOTx details
+	GetVault,					// Get vault details
+	SelectTokens,				// Get the token for payment
+	TokenTracking,				// Token Tracking
+	GetBalance,					// Get the balance
+	ShowAll						// Used for test				
+};
+
 /// Encodes a transaction, ready to be exported to or freshly imported from RLP.
 class TransactionBase
 {
 public:
-	static u256  maxGas;	//默认交易最大gas
+	static u256  maxGas;	
 	/// Constructs a null transaction.
 	TransactionBase() {}
 
@@ -185,31 +200,73 @@ protected:
 	Address m_receiveAddress;			///< The receiving address of the transaction.
 	u256 m_gasPrice;					///< The base fee and thus the implied exchange rate of ETH to GAS.
 	u256 m_gas;							///< The total gas to convert, paid for from sender's account. Any unused gas gets refunded once the contract is ended.
-	u256 m_blockLimit;					//注意
+	u256 m_blockLimit;					
 	bytes m_data;						///< The data associated with the transaction, or the initialiser if it's a creation transaction.
 	SignatureStruct m_vrs;				///< The signature of the transaction. Encodes the sender.
 	int m_chainId = -4;					///< EIP155 value for calculating transaction hash https://github.com/ethereum/EIPs/issues/155
 
-	//是否是以name方式调用
-	bool m_isCalldByName{ false };
-	//是否已经获取地址跟data数据
-	mutable bool m_isGetAddrAndData{ false };
-	//name call方式的参数
-	NameCallParams m_params;
-	mutable std::pair<Address, bytes> m_nameCallAddrAndData;
+	
+	enum TransactionType
+	{
+		DefaultTransaction = 0,  
+		CNSOldTransaction = 1,    
+		CNSNewTransaction = 2     
+	};
+	
+	int     m_transactionType { DefaultTransaction };
+	
+	mutable bool    m_isGetCNSParams { false };
+	mutable Address m_addressGetByCNS;
+	mutable bytes   m_dataGetByCNS;
+	mutable std::string m_strCNSName;
+	mutable std::string m_strCNSVer;
+	mutable u256 m_cnsType;
+	
+	mutable CnsParams m_cnsParams;
+	
+	void doGetCNSparams() const;
 
 public:
-	bool bNameCall() const { return m_isCalldByName; }
-	NameCallParams   params() const { return m_params; }
-	std::pair<Address, bytes> addrAnddata() const;
+	
+	void transactionRLPDecode(bytesConstRef _rlp);
+	void transactionRLPDecode10Ele(const RLP &rlp);
+	void transactionRLPDecode13Ele(const RLP &rlp);
 
+	
+	bool isDefaultTransaction() const { return m_transactionType == DefaultTransaction; }
+	bool isCNSOldTransaction()  const { return m_transactionType == CNSOldTransaction; }
+	bool isCNSNewTransaction()  const { return m_transactionType == CNSNewTransaction; }
+
+	
+	bool isDefault()  const { return isDefaultTransaction() || (isCNSNewTransaction() && m_strCNSName.empty()); }
+	bool isOldCNS()   const { return isCNSOldTransaction(); }
+	bool isNewCNS()   const { return isCNSNewTransaction() && !m_strCNSName.empty(); }
+	bool isCNS()      const { return isOldCNS() || isNewCNS(); }
+
+	const CnsParams &cnsParams() const;
+
+	UTXOType getUTXOType() const { return m_utxoType; }
+	std::vector<UTXOModel::UTXOTxIn> getUTXOTxIn() const { return m_utxoTxIn; }
+	std::vector<UTXOModel::UTXOTxOut> getUTXOTxOut() const { return m_utxoTxOut; }
+	// Determine if it is a UTXO transaction
+	bool isUTXOTx(const std::string& strJson, Json::Value& _json);
+	// Check UTXO transaction
+	void checkUTXOTransaction(UTXOModel::UTXOMgr* _pUTXOMgr) const;
+	// Determine if it is a UTXO transaction with contract
+	bool isUTXOEvmTx() const;
+	void parseUTXOJson(const Json::Value& _json);
 protected:
-	u256 m_importtime = 0;				//入队时间 用来排序
+	u256 m_importtime = 0;				
 	mutable h256 m_hashWith;			///< Cached hash of transaction with signature.
 	mutable Address m_sender;			///< Cached sender, determined from signature.
 	mutable bigint m_gasRequired = 0;	///< Memoised amount required for the transaction to run.
 
 	int m_importType = 0; // default: 0 is from client,  1: from p2p
+
+	UTXOType m_utxoType = InValid;						// UTXO type
+	std::vector<UTXOModel::UTXOTxIn> m_utxoTxIn;		// UTXO Tx inpart
+	std::vector<UTXOModel::UTXOTxOut> m_utxoTxOut;		// UTXO Tx outpart
+	bool m_utxoEvmTx = false;							// UTXO Tx with contract
 };
 
 /// Nice name for vector of Transaction.

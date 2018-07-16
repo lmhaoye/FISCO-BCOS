@@ -32,6 +32,7 @@
 #include "BlockDetails.h"
 #include "BlockQueue.h"
 #include "TransactionQueue.h"
+#include "SystemContractApi.h"
 
 namespace dev
 {
@@ -249,13 +250,13 @@ public:
 	virtual bool isBlockLimitOk(Transaction const&_ts) const = 0;
 
 	virtual u256 filterCheck(const Transaction & _t, FilterCheckScene _checkscene = FilterCheckScene::None) const = 0;
-	virtual void    updateSystemContract(std::shared_ptr<Block>) = 0;
+	virtual void updateSystemContract(std::shared_ptr<Block>) = 0;
+	virtual std::shared_ptr<SystemContractApi> getSystemContract() const = 0;
 
 	virtual void updateCache(Address ) {}
 
 	virtual void sendCustomMessage(const h512, std::shared_ptr<dev::bytes>) {};
-	//为了统计交易处理平均耗时，也是拼了
-	virtual void startStatTranscation(h256) {}
+	virtual UTXOModel::UTXOMgr* getUTXOMgr() = 0;
 
 protected:
 	int m_default = PendingBlock;

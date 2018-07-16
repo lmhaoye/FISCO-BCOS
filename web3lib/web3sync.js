@@ -15,7 +15,7 @@ const fs=require('fs');
 const execSync =require('child_process').execSync;
 const coder = require('./codeUtils');
 var config=require('./config');
-
+var utils = require('./utils');
 /*
 *   npm install --save-dev babel-cli babel-preset-es2017
 *   echo '{ "presets": ["es2017"] }' > .babelrc
@@ -25,23 +25,15 @@ var config=require('./config');
 */
 
 function privateToPublic(privateKey) {
-  privateKey = toBuffer(privateKey)
-  // skip the type flag and use the X, Y points
-  return secp256k1.publicKeyCreate(privateKey, false).slice(1)
+  return utils.privateToPublic(privateKey);
 }
 
 function privateToAddress(privateKey) {
-  return publicToAddress(privateToPublic(privateKey))
+  return utils.privateToAddress(privateKey);
 }
 
 function publicToAddress(pubKey, sanitize) {
-  pubKey = toBuffer(pubKey)
-  if (sanitize && (pubKey.length !== 64)) {
-    pubKey = secp256k1.publicKeyConvert(pubKey, false).slice(1)
-  }
-  assert(pubKey.length === 64)
-  // Only take the lower 160bits of the hash
-  return sha3(pubKey).slice(-20)
+  return utils.publicToAddress(pubKey,sanitize);
 }
 
 
@@ -119,9 +111,7 @@ function setLength(msg, length, right) {
 }
 
 function sha3(a, bits) {
-  a = toBuffer(a)
-  if (!bits) bits = 256
-  return createKeccakHash('keccak' + bits).update(a).digest()
+  return utils.sha3(a,bits);
 }
 
 function baToJSON(ba) {
@@ -250,7 +240,8 @@ function bufferToInt(buf) {
 }
 
 function rlphash(a) {
-  return sha3(rlp.encode(a))
+  //console.log("rlpencode:",rlp.encode(a).toString("hex"));
+  return sha3(rlp.encode(a));
 }
 
 function ecrecover(msgHash, v, r, s) {
@@ -264,13 +255,7 @@ function ecrecover(msgHash, v, r, s) {
 }
 
 function ecsign(msgHash, privateKey) {
-  var sig = secp256k1.sign(msgHash, privateKey)
-
-  var ret = {}
-  ret.r = sig.signature.slice(0, 32)
-  ret.s = sig.signature.slice(32, 64)
-  ret.v = sig.recovery + 27
-  return ret
+  return utils.ecsign(msgHash,privateKey);
 }
 
 //const BN = ethUtil.BN
@@ -279,6 +264,83 @@ function ecsign(msgHash, privateKey) {
 const N_DIV_2 = new BN('7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0', 16)
 
 function Transaction(data) {
+  if (config.EncryptType == 1) {
+    data = data || {}
+    // Define Properties
+    const fields = [{
+      name: 'randomid',
+      length: 32,
+      allowLess: true,
+      default: new Buffer([])
+    }, {
+      name: 'gasPrice',
+      length: 32,
+      allowLess: true,
+      default: new Buffer([])
+    }, {
+      name: 'gasLimit',
+      alias: 'gas',
+      length: 32,
+      allowLess: true,
+      default: new Buffer([])
+    }, {
+      name: 'blockLimit',
+      length: 32,
+      allowLess: true,
+      default: new Buffer([])
+    },{
+      name: 'to',
+      allowZero: true,
+      length: 20,
+      default: new Buffer([])
+    }, {
+      name: 'value',
+      length: 32,
+      allowLess: true,
+      default: new Buffer([])
+    }, {
+      name: 'data',
+      alias: 'input',
+      allowZero: true,
+      default: new Buffer([])
+    }, {
+      name: 'pub',
+      length: 64,
+      allowLess: true,
+      default: new Buffer([])
+    }, {
+      name: 'r',
+      length: 32,
+      allowLess: true,
+      default: new Buffer([])
+    }, {
+      name: 's',
+      length: 32,
+      allowLess: true,
+      default: new Buffer([])
+    }]
+
+    /**
+     * Returns the rlp encoding of the transaction
+     * @method serialize
+     * @return {Buffer}
+     */
+    // attached serialize
+    defineProperties(this, fields, data)
+
+    /**
+     * @prop {Buffer} from (read only) sender address of this transaction, mathematically derived from other parameters.
+     */
+    Object.defineProperty(this, 'from', {
+      enumerable: true,
+      configurable: true,
+      get: this.getSenderAddress.bind(this)
+    })
+
+    // set chainId
+    this._chainId = -4
+    this._homestead = true
+  }else{
     data = data || {}
     // Define Properties
     const fields = [{
@@ -359,6 +421,7 @@ function Transaction(data) {
     this._chainId = chainId || data.chainId || 0
     this._homestead = true
   }
+}
 
   /**
    * If the tx's `to` is to the creation address
@@ -385,9 +448,7 @@ function Transaction(data) {
       this.r = 0
       this.s = 0
     }
-
     // generate rlp params for hash
-	//console.log(this.raw.length)
     var txRawForHash = includeSignature ? this.raw : this.raw.slice(0, this.raw.length - 3)
     //var txRawForHash = includeSignature ? this.raw : this.raw.slice(0, 7)
 
@@ -553,9 +614,9 @@ async function deploy(args,account, filename) {
     //用FISCO-BCOS的合约编译器fisco-solc进行编译
 		execSync("fisco-solc --abi  --bin -o " + config.Ouputpath + "  " + filename + ".sol" + " &>/dev/null");
 
-		//console.log('编译成功！');
+		//console.log('complie success！');
 	} catch(e){
-		console.log('编译失败!' + e);
+		console.log('complie failed!' + e);
 	}
 
 	var abi=JSON.parse(fs.readFileSync(config.Ouputpath+filename+".sol:"+filename+'.abi', 'utf-8'));
@@ -574,7 +635,7 @@ async function deploy(args,account, filename) {
 				} else {
 
 
-					console.log(filename+"合约地址 "+contract.address);
+					console.log(filename+"contract address "+contract.address);
 
           addressjson[filename]=     contract.address;
           fs.writeFileSync(config.Ouputpath+'address.json', JSON.stringify(addressjson), 'utf-8');
@@ -657,57 +718,61 @@ async function unlockAccount(account, password) {
 		})
 	});
 }
-async function rawDeploy(account,  privateKey,filename,types,params,debug) {
+async function rawDeploy(account,  privateKey,filename,types,params) {
     
     try{ 
       //用FISCO-BCOS的合约编译器fisco-solc进行编译
-      execSync("fisco-solc --overwrite --abi  --bin -o " + config.Ouputpath + "  " + filename + ".sol");
-      if( debug )
-        console.log(filename+'编译成功！');
+      if (config.EncryptType == 1) {
+        execSync("fisco-solc-guomi --overwrite --abi  --bin -o " + config.Ouputpath + "  " + filename + ".sol");
+      }else{
+        execSync("fisco-solc --overwrite --abi  --bin -o " + config.Ouputpath + "  " + filename + ".sol");
+      }
+      console.log(filename+'complie success！');
     } catch(e){
-      if( debug )
-        console.log(filename+'编译失败!' + e);
+        console.log(filename+'complie failed!' + e);
     }
 
         var abi=JSON.parse(fs.readFileSync(config.Ouputpath+ "./"+filename+'.abi', 'utf-8'));
         var binary=fs.readFileSync(config.Ouputpath+"./"+filename+".bin",'utf-8');
+        var cons_hex_params = "";
+        if( (typeof types != "undefined") && (typeof params != "undefined")) {
+          cons_hex_params = coder.codeParams(types,params);
+        }     
 
         var postdata = {
-                input: "0x"+binary+coder.codeParams(types,params),
+                input: "0x"+binary+cons_hex_params,
                 from: account,
                 to: null,
                 gas: 100000000,
                 randomid:Math.ceil(Math.random()*100000000),
                 blockLimit:await getBlockNumber() + 1000,
         }
+        
 
         var signTX = signTransaction(postdata, privateKey, null);
-
         return new Promise((resolve, reject) => {
                 web3.eth.sendRawTransaction(signTX, function(err, address) {
                         if (!err) {
-                                
+                                console.log("send transaction success: " + address);
+
                                 checkForTransactionResult(address, (err, receipt) => {
                                 var addressjson={};
                                 if( receipt.contractAddress ){
-                                   
-
-                                    if( debug )
-                                        console.log(filename+"合约地址 "+receipt.contractAddress);
+                                        console.log(filename+"contract address "+receipt.contractAddress);
                                     fs.writeFileSync(config.Ouputpath+filename+'.address', receipt.contractAddress, 'utf-8');       
 
                                 }//if
                                
-                                 var contract = web3.eth.contract(abi).at(receipt.contractAddress);
+                                // var contract = web3.eth.contract(abi).at(receipt.contractAddress);
 
-                                  resolve(contract);
+                                  resolve(receipt);
                                   return;
                                 });
 
                                 return;
                         }
                         else {
-                                console.log("发送交易失败！",err);
+                            console.log("send transaction failed！",err);
 
                                 return;
                         }
@@ -715,11 +780,78 @@ async function rawDeploy(account,  privateKey,filename,types,params,debug) {
         });
 }
 
+//通过name服务调用call函数
+function callByNameService(contract, func, version, params) {
 
+  var namecallparams = {
+    "contract": contract,
+    "func": func,
+    "version": version,
+    "params": params
+  };
+
+  var strnamecallparams = JSON.stringify(namecallparams);
+  //console.log("===>> namecall params = " + strnamecallparams);
+
+  var postdata = {
+    data: namecallparams,
+    to: ""
+  };
+
+  var call_result = web3.eth.call(postdata);
+  return JSON.parse(call_result);
+}
+
+//通过abi name服务发送交易
+async function sendRawTransactionByNameService(account, privateKey, contract, func, version, params) {
+  
+  var namecallparams = {
+    "contract":contract,
+    "func":func,
+    "version":version,
+    "params":params
+  };
+
+  var strnamecallparams = JSON.stringify(namecallparams);
+
+	var postdata = {
+		data: strnamecallparams,
+		from: account,
+	//to: to,
+		gas: 1000000,
+		randomid:Math.ceil(Math.random()*100000000),
+		blockLimit:await getBlockNumber() + 1000,
+	}
+
+	var signTX = signTransaction(postdata, privateKey, null);
+
+	return new Promise((resolve, reject) => {
+		web3.eth.sendRawTransaction(signTX, function(err, address) {
+			if (!err) {
+				console.log("send transaction success: " + address);
+
+				checkForTransactionResult(address, (err, receipt) => {
+					resolve(receipt);
+				});
+
+				//resolve(address);
+			}
+			else {
+			    console.log("send transaction failed！",err);
+
+				return;
+			}
+		});
+	});
+}
 
 async function sendRawTransaction(account, privateKey, to, func, params) {
-	var r = /^\w+\((.+)\)$/g.exec(func);
-	var types = r[1].split(',');
+	// var r = /^\w+\((.+)\)$/g.exec(func);
+  var r = /^\w+\((.*)\)$/g.exec(func);
+  var types = []
+  if (r[1]) {
+    types = r[1].split(',');
+  }
 
 	var tx_data = coder.codeTxData(func,types,params);
 
@@ -737,7 +869,38 @@ async function sendRawTransaction(account, privateKey, to, func, params) {
 	return new Promise((resolve, reject) => {
 		web3.eth.sendRawTransaction(signTX, function(err, address) {
 			if (!err) {
-				//console.log("发送交易成功: " + address);
+				console.log("send transaction success: " + address);
+
+				checkForTransactionResult(address, (err, receipt) => {
+					resolve(receipt);
+				});
+
+				//resolve(address);
+			}
+			else {
+			    console.log("send transaction failed！",err);
+
+				return;
+			}
+		});
+	});
+}
+
+async function sendUTXOTransaction(account, privateKey, params) {
+	var postdata = {
+		data: params[0],
+		from: account,
+		gas: 30000,
+		randomid:Math.ceil(Math.random()*100000000),
+		blockLimit:await getBlockNumber() + 1000,
+	}
+
+	var signTX = signTransaction(postdata, privateKey, null);
+
+	return new Promise((resolve, reject) => {
+		web3.eth.sendRawTransaction(signTX, function(err, address) {
+			if (!err) {
+				console.log("发送交易成功: " + address);
 
 				checkForTransactionResult(address, (err, receipt) => {
 					resolve(receipt);
@@ -754,9 +917,22 @@ async function sendRawTransaction(account, privateKey, to, func, params) {
 	});
 }
 
-exports.getBlockNumber=getBlockNumber;
-exports.sendRawTransaction=sendRawTransaction;
-exports.unlockAccount=unlockAccount;
-exports.rawDeploy=rawDeploy;
+function callUTXO(params) {
+	var postdata = {
+		data: params[0],
+		to: ""
+	};
+
+	return web3.eth.call(postdata);
+}
+
+exports.getBlockNumber = getBlockNumber;
+exports.callByNameService = callByNameService;
+exports.sendRawTransactionByNameService = sendRawTransactionByNameService;
+exports.sendRawTransaction = sendRawTransaction;
+exports.unlockAccount = unlockAccount;
+exports.rawDeploy = rawDeploy;
 exports.signTransaction=signTransaction;
+exports.sendUTXOTransaction = sendUTXOTransaction;
+exports.callUTXO = callUTXO;
 //exports.deploy=deploy;

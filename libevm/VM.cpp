@@ -332,7 +332,7 @@ void VM::interpretCases()
 		{
 			ON_OP();
 
-			u256 ret = ethcallEntry(this, m_sp);
+			u256 ret = ethcallEntry(this, m_sp, m_ext);
 
 			m_sp -= 9;
 			*m_sp = ret;
@@ -1073,7 +1073,11 @@ void VM::interpretCases()
 			++m_pc;
 		CASE_END
 
-		CASE_BEGIN(MSIZE)
+	#ifdef __APPLE__
+	    CASE_BEGIN(MSIZE1)
+	#else
+	    CASE_BEGIN(MSIZE)
+	#endif		
 			ON_OP();
 			updateIOGas();
 

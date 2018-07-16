@@ -114,6 +114,15 @@ Json::Value toJson(dev::eth::BlockHeader const& _bi, SealEngineFace* _sealer)
 		res["timestamp"] = toJS(_bi.timestamp());
 		res["difficulty"] = toJS(_bi.difficulty());
 		res["genIndex"] = toJS(_bi.genIndex());
+
+		auto &nodeList = _bi.nodeList();
+		res["minerNodeId"] = Json::Value();
+		if(nodeList.size() > 0)
+			res["minerNodeId"] = nodeList[_bi.genIndex().convert_to<int>()].hex();
+
+		res["nodeList"] = Json::Value(Json::arrayValue);
+		for(unsigned int i = 0; i < nodeList.size(); i++)
+			res["nodeList"].append(nodeList[i].hex());
 		// TODO: remove once JSONRPC spec is updated to use "author" over "miner".
 		res["miner"] = toJS(_bi.author());
 		if (_sealer)
@@ -141,6 +150,8 @@ Json::Value toJson(dev::eth::Transaction const& _t, std::pair<h256, unsigned> _l
 		res["transactionIndex"] = toJS(_location.second);
 		res["blockNumber"] = toJS(_blockNumber);
 		res["randomId"] = toJS(_t.randomid());
+		//add operation field
+		res["operation"] = _t.isCreation() ? Json::Value(Json::nullValue) : _t.cnsParams().toJsonObject();
 	}
 	return res;
 }
@@ -230,7 +241,11 @@ Json::Value toJson(dev::eth::Transaction const& _t)
 	res["sighash"] = toJS(_t.sha3(WithoutSignature));
 	res["r"] = toJS(_t.signature().r);
 	res["s"] = toJS(_t.signature().s);
+#if ETH_ENCRYPTTYPE
+	res["pub"] = toJS(_t.signature().pub);
+#else
 	res["v"] = toJS(_t.signature().v);
+#endif
 	return res;
 }
 
@@ -373,10 +388,10 @@ Json::Value toJsonByBlock(LocalisedLogEntries const& _entries)
 	return toJson(entriesByBlock, order);
 }
 
-void fromJsonGetParams(Json::Value const& _json, NameCallParams &params)
+void fromJsonGetParams(Json::Value const& _json, CnsParams &params)
 {
 	/*
-	格式：
+     format：
 	{
 	"contract": "Hello",
 	"func": "get",
@@ -413,19 +428,15 @@ void fromJsonGetParams(Json::Value const& _json, NameCallParams &params)
 	{
 		ABI_EXCEPTION_THROW("invalid json request, params param not find or not string format, json=" + _json.toStyledString(), libabi::EnumAbiExceptionErrCode::EnumAbiExceptionErrCodeInvalidArgument);
 	}
-	
+
 	//version
 	if (_json.isMember("version") && _json["version"].isString())
 	{
 		params.strVersion = _json["version"].asString();
 	}
-	else
-	{
-		ABI_EXCEPTION_THROW("invalid json request, version param not find or not string format, json=" + _json.toStyledString(), libabi::EnumAbiExceptionErrCode::EnumAbiExceptionErrCodeInvalidArgument);
-	}
 }
 
-bool fromJsonGetParams(std::string const& _json, NameCallParams &params)
+bool fromJsonGetParams(std::string const& _json, CnsParams &params)
 {
 	/*      
 	Json::Value root;
@@ -451,16 +462,18 @@ bool fromJsonGetParams(std::string const& _json, NameCallParams &params)
 			return true;
 		}
 	}
-	catch (const  libabi::AbiException &e)
+	catch (const libabi::AbiException &e)
 	{
 		throw e;
 	}
 	catch (...)
-	{//其他异常
+	{//other exception
 		LOG(INFO) << "#fromJsonGetParams# other exception , _json = " << _json;
 	}
 
 	return false;
+
+
 }
 
 TransactionSkeleton toTransactionSkeleton(Json::Value const& _json)
@@ -494,9 +507,26 @@ TransactionSkeleton toTransactionSkeleton(Json::Value const& _json)
 	if (!_json["randomid"].empty())
 		ret.randomid = jsToU256(_json["randomid"].asString());
 
-	//增加blocklimit 参数
+	//add blocklimit params
 	if (!_json["blockLimit"].empty())
 		ret.blockLimit = jsToU256(_json["blockLimit"].asString());
+
+	//in CNS, data is json object
+	if (!_json["data"].empty() && _json["data"].isObject())
+		ret.jData = _json["data"];
+
+	//add version
+	if (!_json["version"].empty())
+		ret.strVersion = _json["version"].asString();
+
+	//in CNS, add contract name
+	if (!_json["contractName"].empty())
+		ret.strContractName = _json["contractName"].asString();
+
+	//keep type
+	if (!_json["type"].empty())
+		ret.type = jsToU256(_json["type"].asString());
+
 	return ret;
 }
 

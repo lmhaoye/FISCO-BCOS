@@ -36,6 +36,15 @@
 
 namespace libabi
 {
+	const std::string SolidityTools::CNS_SPLIT_STRING = "@";
+
+	std::vector<std::string> SolidityTools::splitString(const std::string &str, const std::string &splitString)
+	{
+		std::vector<std::string> splitVecString;
+		boost::split(splitVecString, str, boost::is_any_of(splitString));
+		return splitVecString;
+	}
+
 	std::string SolidityTools::nestName(const std::string & strType)
 	{
 		auto r = nestTypes(strType);
@@ -131,7 +140,7 @@ namespace libabi
 			for (const auto &t : types)
 			{
 				std::size_t i = SolidityTools::getStaticArraySize(t);
-				if (i <= 0)
+				if (i == 0)
 				{
 					ABI_EXCEPTION_THROW("static array type get size failed => type is " + strType, EnumAbiExceptionErrCode::EnumAbiExceptionErrCodeInvalidAbiType);
 				}

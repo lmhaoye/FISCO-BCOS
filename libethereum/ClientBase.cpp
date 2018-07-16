@@ -45,6 +45,13 @@ bool ClientBase::isBlockLimitOk(Transaction const&_ts) const
 	return bc().isBlockLimitOk(_ts);
 }
 
+UTXOModel::UTXOMgr* ClientBase::getUTXOMgr() 
+{
+	LOG(TRACE) << "ClientBase::getUTXOMgr()";
+	static UTXOModel::UTXOMgr temp;
+	return &temp;
+}
+
 pair<h256, Address> ClientBase::submitTransaction(TransactionSkeleton const& _t, Secret const& _secret)
 {
 	prepareForTransaction();
@@ -54,14 +61,14 @@ pair<h256, Address> ClientBase::submitTransaction(TransactionSkeleton const& _t,
 
 	Transaction t(ts, _secret);
 	LOG(INFO) << "ClientBase::submitTransaction " << t.sha3();
-	ImportResult ir = m_tq.import(t);	// m_tq里面的manageImport_WITH_LOCK 会对blocklimit和nonce做检查
+	ImportResult ir = m_tq.import(t);	
 	if ( ir == ImportResult::NonceCheckFail )
 	{
-		return make_pair(t.sha3(), Address(1) ); //Address() 代表是异常
+		return make_pair(t.sha3(), Address(1) ); 
 	}
 	else if ( ImportResult::BlockLimitCheckFail == ir )
 	{
-		return make_pair(t.sha3(), Address(2) ); //Address() 代表是异常
+		return make_pair(t.sha3(), Address(2) ); 
 	}
 	else if ( ImportResult::NoTxPermission == ir )
 	{
@@ -69,7 +76,7 @@ pair<h256, Address> ClientBase::submitTransaction(TransactionSkeleton const& _t,
 	}
 	else if ( ImportResult::NoDeployPermission == ir )
 	{
-		return make_pair(t.sha3(), Address(4) ); //Address() 代表是异常
+		return make_pair(t.sha3(), Address(4) ); 
 	}
 	return make_pair(t.sha3(), toAddress(ts.from, ts.randomid));
 }
@@ -80,7 +87,25 @@ ExecutionResult ClientBase::call(Address const& _from, u256 _value, Address _des
 	ExecutionResult ret;
 	try
 	{
-		Block temp = block(_blockNumber);
+		
+		// In source c++-ethereum, funcion 'call' would construct a temp block, when this block is not a recently generated block, eth would load this block from db(Block::populateFromChain)
+		// In this case, we add 'BlockCache' in BlockChain.cpp to cache recent 10 block
+		// Thus, when 'call' is be called, we first try to find whether this block is in cache.
+		Block temp(Block::NullType::Null);
+		bool hit = false;
+		if (_blockNumber > 0) {
+			auto hash = bc().numberHash(_blockNumber);
+			if (hash != h256()) { // found in db
+				std::pair<Block, u256> ret = bc().getBlockCache(hash);
+				if (ret.first.info().number() != Invalid256) {  // use block height to decide whether hit the cache
+					temp = ret.first;
+					hit = true;
+				}
+			} 
+		}
+		if(!hit)
+			temp = block(_blockNumber);
+		// Block temp = block(_blockNumber);
 		temp.setEvmEventLog(bc().chainParams().evmEventLog);
 
 		u256 nonce = max<u256>(temp.transactionsFrom(_from), m_tq.maxNonce(_from));

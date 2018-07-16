@@ -8,6 +8,7 @@
 #!/bin/sh
 set -e
 
+
 #install package
 if grep -Eqi "Ubuntu" /etc/issue || grep -Eq "Ubuntu" /etc/*-release; then
 sudo apt-get -y install cmake
@@ -21,7 +22,7 @@ echo '{ "presets": ["es2017"] }' > ~/.babelrc
 sudo npm install -g secp256k1
 else
 sudo yum -y install cmake3
-
+sudo yum -y install gcc-c++
 sudo yum -y install openssl openssl-devel
 sudo yum -y install nodejs
 sudo yum -y install npm
@@ -35,7 +36,11 @@ chmod +x scripts/install_deps.sh
 ./scripts/install_deps.sh
 
 #install fisco-solc
+if grep -Eqi "Ubuntu" /etc/issue || grep -Eq "Ubuntu" /etc/*-release; then
+sudo cp fisco-solc-ubuntu  /usr/bin/fisco-solc
+else
 sudo cp fisco-solc  /usr/bin/fisco-solc
+fi
 sudo chmod +x /usr/bin/fisco-solc
 
 #install console
@@ -55,11 +60,17 @@ make
 sudo make install
 
 cd ..
-cd ./tool
+cd ./web3lib
 cnpm install
 
 cd ..
-cd ./systemcontractv2
+cd ./tool
+cnpm install
+
+
+
+cd ..
+cd ./systemcontract
 cnpm install
 
 if [ ! -f "/usr/local/bin/fisco-bcos" ]; then
@@ -71,3 +82,9 @@ if [ ! -f "/usr/local/bin/fisco-bcos" ]; then
 #nodejs 版本检查
 node=$(node -v)
 echo | awk  '{if(node < "v6") print "WARNING : fisco need nodejs verion newer than v6 , current version is '$node'"}' node="$node"
+
+if [ "" = "`openssl ecparam -list_curves | grep secp256k1`" ];
+then
+    echo "Current Openssl Don't Support secp256k1 ! Please Upgrade Openssl To  OpenSSL 1.0.2k-fips"
+    exit;
+fi

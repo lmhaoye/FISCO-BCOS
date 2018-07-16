@@ -42,7 +42,7 @@
 #include "State.h"
 #include <libethereum/NonceCheck.h>
 #include "Interface.h"
-#include <libdevcrypto/AES.h>//添加AES加密
+#include <libdevcrypto/AES.h>
 #include <libdevcore/FileSystem.h>
 
 namespace std
@@ -331,7 +331,7 @@ public:
 	void updateCache(Address address)const;
 
 	static u256 maxBlockLimit;
-	// for pbft，验证块，执行交易，验证执行后的状态
+	
 	void checkBlockValid(h256 const& _head, bytes const& _block, Block & _outBlock) const;
 
 
@@ -343,6 +343,7 @@ public:
 	bytes encryptodata(bytesConstRef const& v);
 	bytes encryptodata(bytes const& v);
 	bytes decryptodata(std::string const& v) const;
+	std::shared_ptr<Interface> getClient() const { return m_interface; }
 private:
 	enum CRYPTOTYPE
 	{
@@ -460,11 +461,13 @@ private:
 
 	std::string m_dbPath;
 
-	std::shared_ptr<NonceCheck> m_pnoncecheck; //为了保证nonce一定范围的唯一性
-	std::shared_ptr<Interface> m_interface;//指向client
+	std::shared_ptr<NonceCheck> m_pnoncecheck; 
+	std::shared_ptr<Interface> m_interface;
 
 	mutable SharedMutex  x_blockcache;
 	mutable std::map<h256, std::pair<Block, u256> > m_blockCache;
+	mutable std::deque<h256> m_blockCacheFIFO;  // insert queue log for m_blockCache
+	const unsigned kBlockCacheSize = 10;  // m_blockCache size, default set 10
 
 	
 	friend std::ostream& operator<<(std::ostream& _out, BlockChain const& _bc);

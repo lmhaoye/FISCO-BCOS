@@ -18,6 +18,8 @@
  * @author Alex Leverington <nessence@gmail.com>
  * @author Gav Wood <i@gavwood.com>
  * @date 2014
+*  @author toxotguo
+ * @date 2018
  */
 
 #include <set>
@@ -43,12 +45,14 @@
 #include "RLPxHandshake.h"
 #include "SessionWBCAData.h"
 #include "Host.h"
+#include "HostSSL.h"
 #include "ParseCert.h"
 using namespace std;
 using namespace dev;
 using namespace dev::p2p;
 using namespace dev::eth;
 using namespace dev::crypto;
+
 
 /// Interval at which Host::run will call keepAlivePeers to ping peers.
 std::chrono::seconds const c_keepAliveInterval = std::chrono::seconds(30);
@@ -57,7 +61,7 @@ std::chrono::seconds const c_reconnectNodesInterval = std::chrono::seconds(60);
 /// Disconnect timeout after failure to respond to keepAlivePeers ping.
 std::chrono::milliseconds const c_keepAliveTimeOut = std::chrono::milliseconds(1000);
 
-HostNodeTableHandler::HostNodeTableHandler(Host& _host): m_host(_host) {}
+HostNodeTableHandler::HostNodeTableHandler(HostApi& _host): m_host(_host) {}
 
 void HostNodeTableHandler::processEvent(NodeID const& _n, NodeTableEventType const& _e)
 {
@@ -107,33 +111,35 @@ bytes ReputationManager::data(SessionFace const& _s, std::string const& _sub) co
 	return bytes();
 }
 
-Host::Host(string const& _clientVersion, KeyPair const& _alias, NetworkPreferences const& _n):
+HostApi::HostApi(string const& _clientVersion, KeyPair const& _alias, NetworkPreferences const& _n,int const& _statsInterval):
 	Worker("p2p", 0),
 	m_clientVersion(_clientVersion),
 	m_netPrefs(_n),
 	m_ifAddresses(Network::getInterfaceAddresses()),
-	m_ioService(2),
+	m_ioService(1),
 	m_tcp4Acceptor(m_ioService),
 	m_alias(_alias),
 	m_lastPing(chrono::steady_clock::time_point::min()),
-	m_lastReconnect(chrono::steady_clock::time_point::min())
+	m_lastReconnect(chrono::steady_clock::time_point::min()),
+	m_strand(m_ioService)
 {
+	m_statisticsInterval = _statsInterval;
 	LOG(INFO) << "Id:" << id();
 }
 
-Host::Host(string const& _clientVersion, NetworkPreferences const& _n, bytesConstRef _restoreNetwork, int const& _statsInterval):
-	Host(_clientVersion, networkAlias(_restoreNetwork), _n)
+HostApi::HostApi(string const& _clientVersion, NetworkPreferences const& _n, bytesConstRef _restoreNetwork, int const& _statsInterval):
+	HostApi(_clientVersion, networkAlias(_restoreNetwork), _n,_statsInterval)
 {
-	m_statisticsInterval = _statsInterval;
+	
 	m_restoreNetwork = _restoreNetwork.toBytes();
 }
 
-Host::~Host()
+HostApi::~HostApi()
 {
 	stop();
 }
 
-void Host::start()
+void HostApi::start()
 {
 	DEV_TIMED_FUNCTION_ABOVE(500);
 	startWorking();//启动work循环
@@ -148,7 +154,7 @@ void Host::start()
 	doneWorking();
 }
 
-void Host::stop()
+void HostApi::stop()
 {
 	// called to force io_service to kill any remaining tasks it might have -
 	// such tasks may involve socket reads from Capabilities that maintain references
@@ -174,73 +180,76 @@ void Host::stop()
 		stopWorking();
 }
 
-void Host::doneWorking()
+void HostApi::doWork()
 {
-	// reset ioservice (cancels all timers and allows manually polling network, below)
-	m_ioService.reset();
-
-	DEV_GUARDED(x_timers)
-	m_timers.clear();
-
-	// shutdown acceptor
-	m_tcp4Acceptor.cancel();
-	if (m_tcp4Acceptor.is_open())
-		m_tcp4Acceptor.close();
-
-	// There maybe an incoming connection which started but hasn't finished.
-	// Wait for acceptor to end itself instead of assuming it's complete.
-	// This helps ensure a peer isn't stopped at the same time it's starting
-	// and that socket for pending connection is closed.
-	while (m_accepting)
-		m_ioService.poll();
-
-	// stop capabilities (eth: stops syncing or block/tx broadcast)
-	for (auto const& h : m_capabilities)
-		h.second->onStopping();
-
-	// disconnect pending handshake, before peers, as a handshake may create a peer
-	for (unsigned n = 0;; n = 0)
+	try
 	{
-		DEV_GUARDED(x_connecting)
-		for (auto const& i : m_connecting)
-			if (auto h = i.lock())
-			{
-				h->cancel();
-				n++;
-			}
-		if (!n)
-			break;
-		m_ioService.poll();
+		if (m_run)
+			m_ioService.run();
+	}
+	catch (std::exception const& _e)
+	{
+		LOG(WARNING) << "Exception in Network Thread:" << _e.what();
+		LOG(WARNING) << "Network Restart is Recommended.";
 	}
 
-	// disconnect peers
-	for (unsigned n = 0;; n = 0)
-	{
-		DEV_RECURSIVE_GUARDED(x_sessions)
-		for (auto i : m_sessions)
-			if (auto p = i.second.lock())
-				if (p->isConnected())
-				{
-					p->disconnect(ClientQuit);
-					n++;
-				}
-		if (!n)
-			break;
-
-		// poll so that peers send out disconnect packets
-		m_ioService.poll();
+	if(m_ioService.stopped()) {
+		m_ioService.reset();
 	}
-
-	// stop network (again; helpful to call before subsequent reset())
-	m_ioService.stop();
-
-	// reset network (allows reusing ioservice in future)
-	m_ioService.reset();
-
-	// finally, clear out peers (in case they're lingering)
-	RecursiveGuard l(x_sessions);
-	m_sessions.clear();
 }
+
+PeerSessionInfos HostApi::peerSessionInfo() const
+{
+	if (!m_run)
+		return PeerSessionInfos();
+
+	std::vector<PeerSessionInfo> ret;
+	RecursiveGuard l(x_sessions);
+	for (auto& i : m_sessions)
+		if (auto j = i.second.lock())
+			if (j->isConnected())
+				ret.push_back(j->info());
+	return ret;
+}
+size_t HostApi::peerCount() const
+{
+	unsigned retCount = 0;
+	RecursiveGuard l(x_sessions);
+	for (auto& i : m_sessions)
+		if (std::shared_ptr<SessionFace> j = i.second.lock())
+			if (j->isConnected())
+				retCount++;
+	return retCount;
+}
+bytes HostApi::saveNetwork() const
+{
+
+	RLPStream ret(3);
+	ret << dev::p2p::c_protocolVersion << m_alias.secret().ref();
+	int count = 0;
+	ret.appendList(count);
+	/*if (!!count)
+		ret.appendRaw(network.out(), count);*/
+	return ret.out();
+}
+KeyPair HostApi::networkAlias(bytesConstRef _b)
+{
+	RLP r(_b);
+	if (r.itemCount() == 3 && r[0].isInt() && r[0].toInt<unsigned>() >= 3)
+		return KeyPair(Secret(r[1].toBytes()));
+	else
+	{
+		KeyPair kp = KeyPair::create();
+		RLPStream netData(3);
+		netData << dev::p2p::c_protocolVersion << kp.secret().ref();
+		int count = 0;
+		netData.appendList(count);
+
+		writeFile(getDataDir() + "/network.rlp", netData.out());
+		return kp;
+	}
+}
+
 
 void Host::startPeerSession(Public const& _id, RLP const& _rlp, unique_ptr<RLPXFrameCoder>&& _io, std::shared_ptr<RLPXSocket> const& _s, RLPBaseData &/*rlpBaseData*/)
 {
@@ -314,7 +323,7 @@ void Host::startPeerSession(Public const& _id, RLP const& _rlp, unique_ptr<RLPXF
 
 	// WBCAData wbcaData;
 	// bool ok = NodeConnManagerSingleton::GetInstance().CheckAndSerialize(_rlp, rlpBaseData, wbcaData);
-	// 因为移除了 CA 检查，所以采用相应数据的hash作为判定条件
+	//replace CA check with hash check
 	auto nodeInfoHash = _rlp[5].toHash<h256>();
 	bool ok = NodeConnManagerSingleton::GetInstance().checkNodeInfo(pub.hex(), nodeInfoHash);
 	if (!ok)
@@ -356,13 +365,13 @@ void Host::startPeerSession(Public const& _id, RLP const& _rlp, unique_ptr<RLPXF
 			else
 			{
 				pcap->newPeerCapability(ps, offset, i, 0);
-				//里面会调用ps的newPeerCapability
-				//也会调用EthereumPeer的init lim 里面会发个StatusPacket包
+				//will callback newPeerCapability && 
+				//callback 'init lim' of EthereumPeer to send StatusPacket package
 				offset += pcap->messageCount();
 			}
 		}
 
-		ps->start();//启动session 发个ping包
+		ps->start();//start session by sending ping package
 		m_sessions[_id] = ps;
 	}
 
@@ -394,6 +403,10 @@ void Host::onNodeTableEvent(NodeID const& _n, NodeTableEventType const& _e)
 			}
 			if (peerSlotsAvailable(Egress))
 				connect(p);
+			else 
+			{
+				LOG(INFO)<<" too many egress peer!";
+			}
 		}
 	}
 	else if (_e == NodeEntryDropped)
@@ -465,7 +478,7 @@ void Host::sslHandshakeServer(const boost::system::error_code& error, std::share
 		// incoming connection; we don't yet know nodeid
 		auto handshake = make_shared<RLPXHandshake>(this, socket);
 		m_connecting.push_back(handshake);
-		handshake->start();//握手成功后startPeerSession
+		handshake->start();//startPeerSession after handshake successfully
 		success = true;
 	}
 	catch (Exception const& _e)
@@ -478,7 +491,7 @@ void Host::sslHandshakeServer(const boost::system::error_code& error, std::share
 	}
 	if (!success)
 		socket->ref().close();
-	runAcceptor(); //重复接客
+	runAcceptor(); //accept p2p connection
 }
 
 
@@ -486,17 +499,17 @@ bool Host::sslVerifyCert(bool preverified, ba::ssl::verify_context& ctx)
 {
 	ParseCert parseCert;
 	parseCert.ParseInfo(ctx);
-	string subjectName = parseCert.getSubjectName();//获取证书主题信息
-	int certType = parseCert.getCertType();//获取证书类型  0：CA 1：用户证书
-	bool isExpire = parseCert.getExpire();//判断证书是否过期
-	string serialNumber = parseCert.getSerialNumber();//获取证书序列号
+	string subjectName = parseCert.getSubjectName();//get subject information of the credential
+	int certType = parseCert.getCertType();//get type of the credential(CA: 0, user credential: 1)
+	bool isExpire = parseCert.getExpire();//certificate expired or not 
+	string serialNumber = parseCert.getSerialNumber();//get serial number of the certificate
 	LOG(DEBUG) << "subjectName:" << subjectName;
 	LOG(DEBUG) << "serialNumber:" << serialNumber;
 	LOG(DEBUG) << "preverified:" << preverified;
 	if (isExpire)
 	{
 		preverified = false;
-		cout << "Verify Certificate Expire Data Err Please Use The Right Certificate File Retry....................." << "\n";
+		LOG(ERROR)<< "Verify Certificate Expire Data Err Please Use The Right Certificate File Retry.....................";
 	}
 
 	bool lresult = true;
@@ -506,12 +519,12 @@ bool Host::sslVerifyCert(bool preverified, ba::ssl::verify_context& ctx)
 		if (lresult == false)
 		{
 			preverified = false;
-			cout << "System Contract Verify Certificate Err Please Use The Right Certificate File Retry....................." << "\n";
+			LOG(ERROR)<< "System Contract Verify Certificate Err Please Use The Right Certificate File Retry.....................";
 		}
 	}
 	if (preverified == false && lresult == true)
 	{
-		cout << "Verify Certificate Err Please Use The Right Certificate File Retry....................." << "\n";
+		LOG(ERROR)<< "Verify Certificate Err Please Use The Right Certificate File Retry.....................";
 	}
 	return preverified;
 }
@@ -525,10 +538,10 @@ void Host::runAcceptor()
 		LOG(INFO) << "Listening on local port " << m_listenPort << " (public: " << m_tcpPublic << ")";
 		m_accepting = true;
 
-		LOG(INFO) << "P2P开始Accept";
+		LOG(INFO) << "begin accepting p2p connections";
 		auto socket = make_shared<RLPXSocket>(m_ioService);
-		//设置匿名函数给监听是进行socket连接
-		if (socket->getSocketType() == SSL_SOCKET)
+		//ssl connection
+		if (socket->getSocketType() == SSL_SOCKET_V1)
 		{
 			socket->sslref().set_verify_mode(ba::ssl::verify_peer);
 			socket->sslref().set_verify_callback(boost::bind(&Host::sslVerifyCert, this, _1, _2));
@@ -537,7 +550,7 @@ void Host::runAcceptor()
 		m_tcp4Acceptor.async_accept(socket->ref(), [ = ](boost::system::error_code ec)
 		{
 			auto remoteEndpoint = socket->ref().remote_endpoint();
-			LOG(INFO) << "P2P收到新连接: " << remoteEndpoint.address().to_string() << ":" << remoteEndpoint.port();
+			LOG(INFO) << "Accept New P2P Connection: " << remoteEndpoint.address().to_string() << ":" << remoteEndpoint.port();
 
 			m_accepting = false;
 			if (ec || !m_run)
@@ -554,9 +567,9 @@ void Host::runAcceptor()
 				return;
 			}
 
-			if (socket->getSocketType() == SSL_SOCKET)
+			if (socket->getSocketType() == SSL_SOCKET_V1)
 			{
-				m_tcpClient = socket->remoteEndpoint();//获取客户端连接的IP,Port用于黑白名单验证
+				m_tcpClient = socket->remoteEndpoint();//get (ip, port) of the connector, (ip, port) is used to verify white list
 				LOG(DEBUG) << "client port:" << socket->remoteEndpoint().port() << "|ip:" << socket->remoteEndpoint().address().to_string();
 				LOG(DEBUG) << "server port:" << m_listenPort << "|ip:" << m_tcpPublic.address().to_string();
 				socket->sslref().async_handshake(ba::ssl::stream_base::server, boost::bind(&Host::sslHandshakeServer, this, ba::placeholders::error, socket));
@@ -569,7 +582,7 @@ void Host::runAcceptor()
 					// incoming connection; we don't yet know nodeid
 					auto handshake = make_shared<RLPXHandshake>(this, socket);
 					m_connecting.push_back(handshake);
-					handshake->start();//握手成功后startPeerSession
+					handshake->start();//start peer session after handshake
 					success = true;
 				}
 				catch (Exception const& _e)
@@ -583,15 +596,79 @@ void Host::runAcceptor()
 
 				if (!success)
 					socket->ref().close();
-				runAcceptor(); //重复接客
+				runAcceptor(); 
 			}
 		});
 	}
 }
 
-std::unordered_map<Public, std::string> Host::pocHosts()
+
+void Host::doneWorking()
 {
-	return { };
+	// reset ioservice (cancels all timers and allows manually polling network, below)
+	m_ioService.reset();
+
+	DEV_GUARDED(x_timers)
+	m_timers.clear();
+
+	// shutdown acceptor
+	m_tcp4Acceptor.cancel();
+	if (m_tcp4Acceptor.is_open())
+		m_tcp4Acceptor.close();
+
+	// There maybe an incoming connection which started but hasn't finished.
+	// Wait for acceptor to end itself instead of assuming it's complete.
+	// This helps ensure a peer isn't stopped at the same time it's starting
+	// and that socket for pending connection is closed.
+	while (m_accepting)
+		m_ioService.poll();
+
+	// stop capabilities (eth: stops syncing or block/tx broadcast)
+	for (auto const& h : m_capabilities)
+		h.second->onStopping();
+
+	// disconnect pending handshake, before peers, as a handshake may create a peer
+	for (unsigned n = 0;; n = 0)
+	{
+		DEV_GUARDED(x_connecting)
+		for (auto const& i : m_connecting)
+			if (auto h = i.lock())
+			{
+				h->cancel();
+				n++;
+			}
+		if (!n)
+			break;
+		m_ioService.poll();
+	}
+
+	// disconnect peers
+	for (unsigned n = 0;; n = 0)
+	{
+		DEV_RECURSIVE_GUARDED(x_sessions)
+		for (auto i : m_sessions)
+			if (auto p = i.second.lock())
+				if (p->isConnected())
+				{
+					p->disconnect(ClientQuit);
+					n++;
+				}
+		if (!n)
+			break;
+
+		// poll so that peers send out disconnect packets
+		m_ioService.poll();
+	}
+
+	// stop network (again; helpful to call before subsequent reset())
+	m_ioService.stop();
+
+	// reset network (allows reusing ioservice in future)
+	m_ioService.reset();
+
+	// finally, clear out peers (in case they're lingering)
+	RecursiveGuard l(x_sessions);
+	m_sessions.clear();
 }
 
 void Host::addPeer(NodeSpec const& _s, PeerType _t)
@@ -655,7 +732,7 @@ void Host::requirePeer(NodeID const& _n, NodeIPEndpoint const& _endpoint)
 		}
 		// required for discovery
 		if (m_nodeTable)
-			m_nodeTable->addNode(*p, NodeTable::NodeRelation::Known);//不用discover
+			m_nodeTable->addNode(*p, NodeTable::NodeRelation::Known);
 	}
 	else if (m_nodeTable)
 	{
@@ -728,10 +805,10 @@ void Host::connect(std::shared_ptr<Peer> const& _p)
 	LOG(INFO) << "Attempting connection to node " << _p->id << "@" << ep << " from" << id();
 	auto socket = make_shared<RLPXSocket>(m_ioService);
 
-	//客户端验证证书有效性
-	if (socket->getSocketType() == SSL_SOCKET)
+	// Verify certificate of the connected peer
+	if (socket->getSocketType() == SSL_SOCKET_V1)
 	{
-		m_tcpClient = socket->remoteEndpoint();//获取客户端连接的IP,Port用于黑白名单验证
+		m_tcpClient = socket->remoteEndpoint();//get (IP, Port) of the connected peer to verify the white list
 		socket->sslref().set_verify_mode(ba::ssl::verify_peer);
 		socket->sslref().set_verify_callback(boost::bind(&Host::sslVerifyCert, this, _1, _2));
 	}
@@ -751,7 +828,7 @@ void Host::connect(std::shared_ptr<Peer> const& _p)
 		}
 		else
 		{
-			if (socket->getSocketType() == SSL_SOCKET)
+			if (socket->getSocketType() == SSL_SOCKET_V1)
 			{
 				socket->sslref().async_handshake(ba::ssl::stream_base::client, boost::bind(&Host::sslHandshakeClient, this, ba::placeholders::error, socket, _p->id, nptr));
 			}
@@ -772,31 +849,6 @@ void Host::connect(std::shared_ptr<Peer> const& _p)
 	});
 }
 
-PeerSessionInfos Host::peerSessionInfo() const
-{
-	if (!m_run)
-		return PeerSessionInfos();
-
-	std::vector<PeerSessionInfo> ret;
-	RecursiveGuard l(x_sessions);
-	for (auto& i : m_sessions)
-		if (auto j = i.second.lock())
-			if (j->isConnected())
-				ret.push_back(j->info());
-	return ret;
-}
-
-
-size_t Host::peerCount() const
-{
-	unsigned retCount = 0;
-	RecursiveGuard l(x_sessions);
-	for (auto& i : m_sessions)
-		if (std::shared_ptr<SessionFace> j = i.second.lock())
-			if (j->isConnected())
-				retCount++;
-	return retCount;
-}
 
 void Host::run(boost::system::error_code const&)
 {
@@ -868,15 +920,15 @@ void Host::run(boost::system::error_code const&)
 	}
 	*/
 
-	//查看是否所有节点已经连接 如果断掉则进行连接
+	//reconnect disconnected peers
 	reconnectAllNodes();
 
 	auto runcb = [this](boost::system::error_code const & error) { run(error); };
 	m_timer->expires_from_now(boost::posix_time::milliseconds(c_timerInterval));
-	m_timer->async_wait(runcb);   //不断回调run()
+	m_timer->async_wait(runcb);   //callback run()
 }
 
-//work dowork循环之前，先执行这个
+// callback startedWorking firstly before callback dowork function of work class
 void Host::startedWorking()
 {
 	asserts(!m_timer);
@@ -890,25 +942,24 @@ void Host::startedWorking()
 		m_timer.reset(new boost::asio::deadline_timer(m_ioService));
 		m_run = true;
 	}
-	//在调这里之前Client初始化的时候已经将EthereumHost注册进来registerCapability
+
 	// start capability threads (ready for incoming connections)
-	//进行连接 根据已连接的状态值进行连接
 	for (auto const& h : m_capabilities)
-		h.second->onStarting();// 启动多个线程
+		h.second->onStarting();
 
 	// try to open acceptor (todo: ipv6)
-	//已经进行bind和listen
+	// accept connections of peers
 	int port = Network::tcp4Listen(m_tcp4Acceptor, m_netPrefs);
 	if (port > 0)
 	{
 		m_listenPort = port;
 		determinePublic();
-		runAcceptor(); //开始接客
+		runAcceptor(); 
 	}
 	else
 	{
 		LOG(INFO) << "p2p.start.notice id:" << id() << "TCP Listen port is invalid or unavailable.";
-		LOG(ERROR) << "P2pPort 绑定失败！" << "\n";
+		LOG(ERROR) << "P2pPort bind failed！" << "\n";
 		exit(-1);
 	}
 
@@ -920,28 +971,16 @@ void Host::startedWorking()
 	                     m_netPrefs.discovery
 	                 );
 	nodeTable->setEventHandler(new HostNodeTableHandler(*this));
-	//将配置文件中的连接节点传入nodeTable中去
+	//load endpoint information of peers into node table from configuration file(config.json)
 	m_nodeTable = nodeTable;
 	restoreNetwork(&m_restoreNetwork);
 
 	LOG(INFO) << "p2p.started id:" << id();
 
-	run(boost::system::error_code());//第一次执行
+	run(boost::system::error_code());
 }
 
-void Host::doWork()
-{
-	try
-	{
-		if (m_run)
-			m_ioService.run();
-	}
-	catch (std::exception const& _e)
-	{
-		LOG(WARNING) << "Exception in Network Thread:" << _e.what();
-		LOG(WARNING) << "Network Restart is Recommended.";
-	}
-}
+
 
 void Host::keepAlivePeers()
 {
@@ -969,12 +1008,12 @@ void Host::reconnectAllNodes()
 	if (chrono::steady_clock::now() - c_reconnectNodesInterval < m_lastReconnect)
 		return;
 
-	//使用合约和配置文件的全部数据
+	// load endpoint information of peers from both system contract and configuration file (config.json)
 	std::map<std::string, eth::NodeConnParams> mNodeConnParams;
 	NodeConnManagerSingleton::GetInstance().getAllNodeConnInfoContractAndConf(mNodeConnParams);
 
 	RecursiveGuard l(x_sessions);
-	//检查配置中的节点，进行连接
+	// reconnect disconnected peers 
 	for (auto stNode : mNodeConnParams)
 	{
 		if (m_sessions.find(dev::jsToPublic(dev::toJS(stNode.first))) == m_sessions.end() && stNode.first != id().hex())
@@ -1121,11 +1160,11 @@ void Host::recheckAllCA()
 	}
 }
 
-//保存CA数据到session
+// save ca data into session
 void Host::saveCADataByNodeId(const std::string nodeId, CABaseData &baseData)
 {
 	RecursiveGuard l(x_sessions);
-	//startPeerSession 已经做了key的判断来insert
+	//set CA data into session related to nodeId
 	if (m_sessions.find(dev::jsToPublic(dev::toJS(nodeId))) != m_sessions.end())
 	{
 		auto pp = m_sessions[jsToPublic(toJS(nodeId))].lock();
@@ -1150,60 +1189,7 @@ void Host::saveCADataByNodeId(const std::string nodeId, CABaseData &baseData)
 	}
 }
 
-bytes Host::saveNetwork() const
-{
-	//std::list<Peer> peers;
-	//{
-	//	RecursiveGuard l(x_sessions);
-	//	for (auto p: m_peers)
-	//		if (p.second)
-	//			peers.push_back(*p.second);
-	//}
-	//peers.sort();
 
-	//RLPStream network;
-	//int count = 0;
-	//for (auto const& p: peers)
-	//{
-	//	// todo: ipv6
-	//	if (!p.endpoint.address.is_v4())
-	//		continue;
-
-	//	// Only save peers which have connected within 2 days, with properly-advertised port and public IP address
-	//	if (chrono::system_clock::now() - p.m_lastConnected < chrono::seconds(3600 * 48) && !!p.endpoint && p.id != id() && (p.peerType == PeerType::Required || p.endpoint.isAllowed()))
-	//	{
-	//		network.appendList(11);
-	//		p.endpoint.streamRLP(network, NodeIPEndpoint::StreamInline);
-	//		network << p.id << (p.peerType == PeerType::Required ? true : false)
-	//			<< chrono::duration_cast<chrono::seconds>(p.m_lastConnected.time_since_epoch()).count()
-	//			<< chrono::duration_cast<chrono::seconds>(p.m_lastAttempted.time_since_epoch()).count()
-	//			<< p.m_failedAttempts << (unsigned)p.m_lastDisconnect << p.m_score << p.m_rating;
-	//		count++;
-	//	}
-	//}
-
-	//if (!!m_nodeTable)
-	//{
-	//	auto state = m_nodeTable->snapshot();
-	//	state.sort();
-	//	for (auto const& entry: state)
-	//	{
-	//		network.appendList(4);
-	//		entry.endpoint.streamRLP(network, NodeIPEndpoint::StreamInline);
-	//		network << entry.id;
-	//		count++;
-	//	}
-	//}
-	// else: TODO: use previous configuration if available
-
-	RLPStream ret(3);
-	ret << dev::p2p::c_protocolVersion << m_alias.secret().ref();
-	int count = 0;
-	ret.appendList(count);
-	/*if (!!count)
-		ret.appendRaw(network.out(), count);*/
-	return ret.out();
-}
 
 void Host::restoreNetwork(bytesConstRef _b)
 {
@@ -1218,101 +1204,18 @@ void Host::restoreNetwork(bytesConstRef _b)
 		return;
 
 	RecursiveGuard l(x_sessions);
-	RLP r(_b);
-	unsigned fileVersion = r[0].toInt<unsigned>();
-	if (r.itemCount() > 0 && r[0].isInt() && fileVersion >= dev::p2p::c_protocolVersion - 1)
-	{
-		// r[0] = version
-		// r[1] = key
-		// r[2] = nodes
 
-		for (auto i : r[2])
-		{
-			// todo: ipv6
-			if (i[0].itemCount() != 4 && i[0].size() != 4)
-				continue;
-
-			if (i.itemCount() == 4 || i.itemCount() == 11)
-			{
-				Node n((NodeID)i[3], NodeIPEndpoint(i));
-				if (i.itemCount() == 4 && n.endpoint.isAllowed())
-					m_nodeTable->addNode(n);
-				else if (i.itemCount() == 11)
-				{
-					n.peerType = i[4].toInt<bool>() ? PeerType::Required : PeerType::Optional;
-					if (!n.endpoint.isAllowed() && n.peerType == PeerType::Optional)
-						continue;
-					shared_ptr<Peer> p = make_shared<Peer>(n);
-					p->m_lastConnected = chrono::system_clock::time_point(chrono::seconds(i[5].toInt<unsigned>()));
-					p->m_lastAttempted = chrono::system_clock::time_point(chrono::seconds(i[6].toInt<unsigned>()));
-					p->m_failedAttempts = i[7].toInt<unsigned>();
-					p->m_lastDisconnect = (DisconnectReason)i[8].toInt<unsigned>();
-					p->m_score = (int)i[9].toInt<unsigned>();
-					p->m_rating = (int)i[10].toInt<unsigned>();
-					m_peers[p->id] = p;
-					if (p->peerType == PeerType::Required)
-						requirePeer(p->id, n.endpoint);
-					else
-						m_nodeTable->addNode(*p.get(), NodeTable::NodeRelation::Known);
-				}
-			}
-			else if (i.itemCount() == 3 || i.itemCount() == 10)
-			{
-				Node n((NodeID)i[2], NodeIPEndpoint(bi::address_v4(i[0].toArray<byte, 4>()), i[1].toInt<uint16_t>(), i[1].toInt<uint16_t>()));
-				if (i.itemCount() == 3 && n.endpoint.isAllowed())
-					m_nodeTable->addNode(n);
-				else if (i.itemCount() == 10)
-				{
-					n.peerType = i[3].toInt<bool>() ? PeerType::Required : PeerType::Optional;
-					if (!n.endpoint.isAllowed() && n.peerType == PeerType::Optional)
-						continue;
-					shared_ptr<Peer> p = make_shared<Peer>(n);
-					p->m_lastConnected = chrono::system_clock::time_point(chrono::seconds(i[4].toInt<unsigned>()));
-					p->m_lastAttempted = chrono::system_clock::time_point(chrono::seconds(i[5].toInt<unsigned>()));
-					p->m_failedAttempts = i[6].toInt<unsigned>();
-					p->m_lastDisconnect = (DisconnectReason)i[7].toInt<unsigned>();
-					p->m_score = (int)i[8].toInt<unsigned>();
-					p->m_rating = (int)i[9].toInt<unsigned>();
-					m_peers[p->id] = p;
-					if (p->peerType == PeerType::Required)
-						requirePeer(p->id, n.endpoint);
-					else
-						m_nodeTable->addNode(*p.get(), NodeTable::NodeRelation::Known);
-				}
-			}
-		}
-	}
-
-	//增加节点读入
 	addConnParamsToNodeTable();
-}
-
-KeyPair Host::networkAlias(bytesConstRef _b)
-{
-	RLP r(_b);
-	if (r.itemCount() == 3 && r[0].isInt() && r[0].toInt<unsigned>() >= 3)
-		return KeyPair(Secret(r[1].toBytes()));
-	else
-	{
-		KeyPair kp = KeyPair::create();
-		RLPStream netData(3);
-		netData << dev::p2p::c_protocolVersion << kp.secret().ref();
-		int count = 0;
-		netData.appendList(count);
-
-		writeFile(getDataDir() + "/network.rlp", netData.out());
-		return kp;
-	}
 }
 
 void Host::addConnParamsToNodeTable()
 {
 	std::map<std::string, eth::NodeConnParams> mNodeConnParams;
-	//将合约和配置文件中的全部数据存入nodetable
+	// load endpoint information into node table from both system contract and configuration file
 	NodeConnManagerSingleton::GetInstance().getAllNodeConnInfoContractAndConf(mNodeConnParams);
 	for (auto param : mNodeConnParams)
 	{
-		//排除本身
+		//rule out itself
 		if (id().hex() == param.first)
 		{
 			continue;
@@ -1323,3 +1226,24 @@ void Host::addConnParamsToNodeTable()
 		m_nodeTable->addNode(Node(ns.id(), ns.nodeIPEndpoint()), NodeTable::NodeRelation::Known);
 	}
 }
+
+HostApi* HostSingleton::GetHost(
+				std::string const& _clientVersion,
+				NetworkPreferences const& _n ,
+				bytesConstRef _restoreNetwork ,
+				int const& _statisticsInterval 
+			)
+{
+	if (dev::getSSL() == SSL_SOCKET_V2)
+	{
+		static HostSSL hostSSL(_clientVersion,CertificateServer::GetInstance().keypair(),_n);
+		return &hostSSL;
+	}
+	else
+	{
+		static Host host(_clientVersion,_n,_restoreNetwork,_statisticsInterval);
+		return &host;
+	}
+   
+}
+

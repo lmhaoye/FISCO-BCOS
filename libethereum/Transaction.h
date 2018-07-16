@@ -54,8 +54,20 @@ enum class TransactionException
 	FilterCheckFail,
 	NoDeployPermission,
 	NoCallPermission,
-	NoTxPermission
-
+	NoTxPermission,
+	EthCallIdNotFound,
+	UTXOInvalidType,
+	UTXOJsonParamError,
+	UTXOTokenIDInvalid,
+	UTXOTokenUsed,
+	UTXOTokenOwnerShipCheckFail,
+	UTXOTokenLogicCheckFail,
+	UTXOTokenAccountingBalanceFail,
+	UTXOTokenCntOutofRange,
+	UTXOTokenKeyRepeat,
+	UTXOLowEthVersion,
+	UTXOTxError,
+	UTXODBError
 };
 
 enum class CodeDeposit

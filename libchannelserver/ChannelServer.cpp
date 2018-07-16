@@ -30,24 +30,22 @@
 #include <boost/asio.hpp>
 
 using namespace dev::channel;
-using namespace std;
 
 void dev::channel::ChannelServer::run() {
-	//是否监听
+	_threadPool = std::make_shared<ThreadPool>("ChannelServerWorker", 8);
 	if (!_listenHost.empty() && _listenPort > 0) {
 		_acceptor = std::make_shared<boost::asio::ip::tcp::acceptor>(*_ioService, boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(_listenHost), _listenPort));
 
 		boost::asio::socket_base::reuse_address optionReuseAddress(true);
 		_acceptor->set_option(optionReuseAddress);
 
-		startAccept();
 	}
 
-	//让server维护线程
-	for (int i = 0; i < 1; ++i) {
-		auto serverThreads = std::make_shared<std::thread>([ = ]() {
+	_serverThread = std::make_shared<std::thread>([=]() {
+			pthread_setThreadName("ChannelServer" );
 			while (true) {
 				try {
+					startAccept();
 					_ioService->run();
 				}
 				catch (std::exception &e) {
@@ -57,15 +55,13 @@ void dev::channel::ChannelServer::run() {
 				LOG(ERROR) << "尝试重启 ";
 
 				sleep(1);
+				if(_ioService->stopped()) {
+					_ioService->reset();
+				}
 			}
 		});
 
-		serverThreads->detach();
-
-		_serverThreads.push_back(serverThreads);
-	}
-
-	//_ioService->run();
+	_serverThread->detach();
 }
 
 
@@ -94,7 +90,7 @@ void dev::channel::ChannelServer::onAccept(const boost::system::error_code& erro
 		try {
 			session->sslSocket()->lowest_layer().close();
 		}
-		catch (exception &e) {
+		catch (std::exception &e) {
 			LOG(ERROR) << "close失败" << e.what();
 		}
 	}
@@ -105,6 +101,8 @@ void dev::channel::ChannelServer::onAccept(const boost::system::error_code& erro
 void dev::channel::ChannelServer::startAccept() {
 	try {
 		ChannelSession::Ptr session = std::make_shared<ChannelSession>();
+		session->setThreadPool(_threadPool);
+		session->setIOService(_ioService);
 
 		if (_enableSSL) {
 			session->setSSLSocket(std::make_shared<boost::asio::ssl::stream<boost::asio::ip::tcp::socket> >(*_ioService, *_sslContext));
@@ -115,7 +113,7 @@ void dev::channel::ChannelServer::startAccept() {
 			//session->setSocket(std::make_shared())
 		}
 	}
-	catch (exception &e) {
+	catch (std::exception &e) {
 		LOG(ERROR) << "错误:" << e.what();
 	}
 }
@@ -135,7 +133,7 @@ void dev::channel::ChannelServer::stop() {
 
 		_acceptor->close();
 	}
-	catch (exception &e) {
+	catch (std::exception &e) {
 		LOG(ERROR) << "错误:" << e.what();
 	}
 
@@ -143,7 +141,7 @@ void dev::channel::ChannelServer::stop() {
 		LOG(DEBUG) << "关闭ioService";
 		_ioService->stop();
 	}
-	catch (exception &e) {
+	catch (std::exception &e) {
 		LOG(ERROR) << "错误:" << e.what();
 	}
 }
@@ -165,12 +163,12 @@ void dev::channel::ChannelServer::onHandshake(const boost::system::error_code& e
 			try {
 				session->sslSocket()->lowest_layer().close();
 			}
-			catch (exception &e) {
+			catch (std::exception &e) {
 				LOG(ERROR) << "shutdown错误:" << e.what();
 			}
 		}
 	}
-	catch (exception &e) {
+	catch (std::exception &e) {
 		LOG(ERROR) << "错误:" << e.what();
 	}
 }
