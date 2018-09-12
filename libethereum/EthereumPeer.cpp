@@ -56,7 +56,10 @@ EthereumPeer::EthereumPeer(std::shared_ptr<SessionFace> _s, HostCapabilityFace* 
 	Capability(_s, _h, _i, _capID),
 	m_peerCapabilityVersion(_cap.second)
 {
-	session()->addNote("manners", isRude() ? "RUDE" : "nice");
+	auto s = session();
+	if(s) {
+		s->addNote("manners", isRude() ? "RUDE" : "nice");
+	}
 
 	_topics = std::make_shared<std::vector<std::string> >();
 }
@@ -68,7 +71,7 @@ EthereumPeer::~EthereumPeer()
 		LOG(INFO) << "Peer aborting while being asked for " << toString(m_asking);
 		setRude();
 	}
-	LOG(WARNING) << "EthereumPeer::~EthereumPeer";
+	LOG(INFO) << "EthereumPeer::~EthereumPeer";
 	abortSync();
 }
 
@@ -112,7 +115,7 @@ void EthereumPeer::setRude()
 	s->repMan().setData(*s, name(), rlp(askOverride() / 2 + 1));
 	LOG(INFO) << "Rude behaviour; askOverride now" << askOverride() << ", was" << old;
 	s->repMan().noteRude(*s, name());
-	session()->addNote("manners", "RUDE");
+	s->addNote("manners", "RUDE");
 }
 
 void EthereumPeer::abortSync()
@@ -237,9 +240,9 @@ void EthereumPeer::tick()
 	if(s && s->isConnected()
 			&& chrono::duration_cast<chrono::seconds>(std::chrono::steady_clock::now() - s->lastReceived()).count() > 30) { //使用pingpong代替lastTopicAck
 		try {
-			LOG(WARNING) << "Timeout Disconnect:" << id() << "@"
-					<< session()->peer()->endpoint.address.to_string() << ":"
-					<< session()->peer()->endpoint.tcpPort;
+			LOG(WARNING) << "Timeout Disconnect:" << id().abridged() << "@"
+					<< s->peer()->endpoint.address.to_string() << ":"
+					<< s->peer()->endpoint.tcpPort;
 
 			s->disconnect(PingTimeout);
 		}
@@ -499,11 +502,14 @@ bool EthereumPeer::interpret(unsigned _id, RLP const& _r)
 			
 			std::shared_ptr<std::vector<std::string> > topics(new std::vector<std::string>());
 
-			LOG(TRACE) << "Recv Other Node topic Message:" << id()
-					<< "@"
-					<< session()->peer()->endpoint.address.to_string()
-					<< ":"
-					<< session()->peer()->endpoint.tcpPort;
+			auto s = session();
+			if(s) {
+				LOG(TRACE) << "Recv Other Node topic Message:" << id().abridged()
+						<< "@"
+						<< s->peer()->endpoint.address.to_string()
+						<< ":"
+						<< s->peer()->endpoint.tcpPort;
+			}
 
 			try {
 				int type = _r[0].toInt(); 
@@ -521,7 +527,7 @@ bool EthereumPeer::interpret(unsigned _id, RLP const& _r)
 				_channelObserver->onTopicMessage(dynamic_pointer_cast<EthereumPeer>(shared_from_this()), type, seq, topics);
 			}
 			catch(exception &e) {
-				LOG(ERROR) << "Process:" << id() << "  topic Exception:" << e.what();
+				LOG(ERROR) << "Process:" << id().abridged() << "  topic Exception:" << e.what();
 			}
 
 			break;
@@ -531,11 +537,14 @@ bool EthereumPeer::interpret(unsigned _id, RLP const& _r)
 			std::shared_ptr<bytes> data(new bytes());
 			*data = _r[0].toBytes();
 
-			LOG(TRACE) << "Recv Other Node channel Message:" << id()
-					<< "@"
-					<< session()->peer()->endpoint.address.to_string()
-					<< ":"
-					<< session()->peer()->endpoint.tcpPort;
+			auto s = session();
+			if(s) {
+				LOG(TRACE) << "Recv Other Node channel Message:" << id().abridged()
+						<< "@"
+						<< s->peer()->endpoint.address.to_string()
+						<< ":"
+						<< s->peer()->endpoint.tcpPort;
+			}
 
 			
 			_channelObserver->onChannelMessage(dynamic_pointer_cast<EthereumPeer>(shared_from_this()), data);

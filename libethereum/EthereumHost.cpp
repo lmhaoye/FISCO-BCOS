@@ -196,7 +196,7 @@ public:
 		{
 			blockHash = _blockId.toHash<h256>();
 			//blockNumber = host()->chain().number(blockHash);
-			LOG(INFO) << "GetBlockHeaders (block (hash): " << blockHash
+			LOG(DEBUG) << "GetBlockHeaders (block (hash): " << blockHash
 			          << ", maxHeaders: " << _maxHeaders
 			          << ", skip: " << _skip << ", reverse: " << _reverse << ")";
 
@@ -226,7 +226,7 @@ public:
 		else // block id is a number
 		{
 			auto n = _blockId.toInt<bigint>();
-			LOG(INFO) << "GetBlockHeaders (" << n
+			LOG(DEBUG) << "GetBlockHeaders (" << n
 			          << "max: " << _maxHeaders
 			          << "skip: " << _skip << (_reverse ? "reverse" : "") << ")";
 
@@ -402,26 +402,26 @@ public:
 
 	virtual void onTopicMessage(std::shared_ptr<EthereumPeer> peer, int type, int seq, std::shared_ptr<std::vector<std::string> > topics) {
 
-		LOG(DEBUG) <<" Recv topic type:" << type << " seq:" << seq << " topics:" << topics->size();
+		LOG(TRACE) <<" Recv topic type:" << type << " seq:" << seq << " topics:" << topics->size();
 		switch (type) {
 		case 0: 
 		{
 			if (peer->getTopicsSeq() != seq) {
-				LOG(DEBUG) << "peer seq:" << seq << " local seq:" << peer->getTopicsSeq() << "request lastest topics";
+				LOG(TRACE) << "peer seq:" << seq << " local seq:" << peer->getTopicsSeq() << "request lastest topics";
 				_host->sendTopicsMessage(peer->id(), 1, 0, std::make_shared<std::set<std::string> >());
 			}
 			break;
 		}
 		case 1: 
 		{
-			LOG(DEBUG) << "send topics data";
+			LOG(TRACE) << "send topics data";
 			_host->sendTopicsMessage(peer->id(), 2, _host->getTopicsSeq(), _host->getTopics());
 
 			break;
 		}
 		case 2: 
 		{
-			LOG(TRACE) << "Recv peer:" << peer->id() << "  topics sum:" << topics->size();
+			LOG(TRACE) << "Recv peer:" << peer->id().abridged() << "  topics sum:" << topics->size();
 			for (auto it : *topics) {
 				LOG(TRACE) << "topic:" << it;
 			}
@@ -602,10 +602,13 @@ void EthereumHost::maintainTransactions()
 			RLPStream ts;
 			_p->prep(ts, TransactionsPacket, n).appendRaw(b, n);
 
-			BroadcastTxSizeLog(_p->session()->id(), ts.out().size());
+			auto s = _p->session();
+			if(s) {
+				BroadcastTxSizeLog(s->id(), ts.out().size());
 
-			_p->sealAndSend(ts);
-			LOG(TRACE) << "Sent" << n << "transactions to " << _p->session()->info().clientVersion;
+				_p->sealAndSend(ts);
+				LOG(TRACE) << "Sent" << n << "transactions to " << s->info().clientVersion;
+			}
 		}
 		_p->m_requireTransactions = false;
 		return true;
@@ -711,16 +714,19 @@ void EthereumHost::maintainBlocks(h256 const & _currentHash)
 					RLPStream ts;
 					p->prep(ts, NewBlockPacket, 2).appendRaw(m_chain.block(b), 1).append(m_chain.details(b).totalDifficulty);
 					
-					BroadcastBlockSizeLog(p->session()->id(), ts.out().size());
-					//Guard l(p->x_knownBlocks);
-					p->sealAndSend(ts);
-					//p->m_knownBlocks.clear();
-					DEV_GUARDED(p->x_knownBlocks)
-					{
-						if (p->m_knownBlocks.size() > EthereumPeer::kKnownBlockSize) {
-							p->m_knownBlocks.pop();
+					auto s = p->session();
+					if(s) {
+						BroadcastBlockSizeLog(s->id(), ts.out().size());
+						//Guard l(p->x_knownBlocks);
+						p->sealAndSend(ts);
+						//p->m_knownBlocks.clear();
+						DEV_GUARDED(p->x_knownBlocks)
+						{
+							if (p->m_knownBlocks.size() > EthereumPeer::kKnownBlockSize) {
+								p->m_knownBlocks.pop();
+							}
+							p->m_knownBlocks.insert(b);
 						}
-						p->m_knownBlocks.insert(b);
 					}
 				}
 		}
@@ -840,48 +846,52 @@ void EthereumHost::setWeb3Observer(Web3Observer::Ptr _observer) {
 }
 
 void EthereumHost::sendCustomMessage(NodeID nodeID, std::shared_ptr<bytes> message) {
-	LOG(TRACE) << "Search Node:" << nodeID;
+	LOG(TRACE) << "Search Node:" << nodeID.abridged();
 	bool sended = false;
 
 	foreachPeer([&](std::shared_ptr<EthereumPeer> peer) {
-		
 		if (peer->id() == nodeID) {
-			LOG(TRACE) << "Send Message To " << nodeID
-			           << "@"
-			           << peer->session()->peer()->endpoint.address.to_string()
-			           << ":"
-			           << peer->session()->peer()->endpoint.tcpPort;
+			auto session = peer->session();
 
-			RLPStream s;
-			peer->prep(s, CustomMessage, 1)	<< *message;
+			if(session) {
+				LOG(TRACE) << "Send Message To " << nodeID.abridged()
+						   << "@"
+						   << session->peer()->endpoint.address.to_string()
+						   << ":"
+						   << session->peer()->endpoint.tcpPort;
 
-			peer->sealAndSend(s);
-			sended = true;
+				RLPStream s;
+				peer->prep(s, CustomMessage, 1)	<< *message;
 
-			return false;
+				peer->sealAndSend(s);
+				sended = true;
+
+				return false;
+			}
 		}
 
 		return true;
 	});
 
 	if (sended == false) {
-		LOG(ERROR) << "Send Fail, no available node :" << nodeID;
+		LOG(ERROR) << "Send Fail, no available node :" << nodeID.abridged();
 		throw Exception("No Reach Node");
 	}
 }
 
 std::vector<p2p::NodeID> EthereumHost::getPeersByTopic(std::string topic) {
-	
 	std::vector<p2p::NodeID> availablePeers;
-
 	
 	foreachPeer([&](std::shared_ptr<EthereumPeer> peer) {
 		for (auto peerTopic : * (peer->getTopics())) {
 			if (peerTopic == topic) {
-				LOG(DEBUG) << "Node:" << peer->id() << "@"
-				           << peer->session()->peer()->endpoint.address.to_string()
-				           << ":"
-				           << peer->session()->peer()->endpoint.tcpPort << " Subscribe  topic:" << topic;
+				auto s = peer->session();
+				if(s) {
+					LOG(DEBUG) << "Node:" << peer->id().abridged() << "@"
+							   << s->peer()->endpoint.address.to_string()
+							   << ":"
+							   << s->peer()->endpoint.tcpPort << " Subscribe  topic:" << topic;
+				}
 
 				availablePeers.push_back(peer->id());
 				break;
@@ -895,17 +905,21 @@ std::vector<p2p::NodeID> EthereumHost::getPeersByTopic(std::string topic) {
 }
 
 void EthereumHost::sendTopicsMessage(p2p::NodeID nodeID, int type, int seq, std::shared_ptr<std::set<std::string> > topics) {
-	LOG(DEBUG) <<" Send topic Req:" << seq << " type:" << type;
+	LOG(TRACE) <<" Send topic Req:" << seq << " type:" << type;
 	int peerSended = 0;
 
 	
 	if (nodeID == p2p::NodeID()) {
 		foreachPeer([&](std::shared_ptr<EthereumPeer> peer) {
-			LOG(DEBUG) << "topics Send to" << peer->id()
-			           << "@"
-			           << peer->session()->peer()->endpoint.address.to_string()
-			           << ":"
-			           << peer->session()->peer()->endpoint.tcpPort;
+			auto session = peer->session();
+
+			if(session) {
+				LOG(TRACE) << "topics Send to" << peer->id().abridged()
+						   << "@"
+						   << session->peer()->endpoint.address.to_string()
+						   << ":"
+						   << session->peer()->endpoint.tcpPort;
+			}
 
 			RLPStream s;
 			peer->prep(s, Topics, 3 + topics->size());
@@ -929,11 +943,14 @@ void EthereumHost::sendTopicsMessage(p2p::NodeID nodeID, int type, int seq, std:
 	else {
 		foreachPeer([&](std::shared_ptr<EthereumPeer> peer) {
 			if (peer->id() == nodeID) {
-				LOG(DEBUG) << "topics Send to" << peer->id()
-				           << "@"
-				           << peer->session()->peer()->endpoint.address.to_string()
-				           << ":"
-				           << peer->session()->peer()->endpoint.tcpPort;
+				auto session = peer->session();
+				if(session) {
+					LOG(TRACE) << "topics Send to" << peer->id().abridged()
+							   << "@"
+							   << session->peer()->endpoint.address.to_string()
+							   << ":"
+							   << session->peer()->endpoint.tcpPort;
+				}
 
 				RLPStream s;
 				peer->prep(s, Topics, 3 + topics->size());
@@ -958,10 +975,9 @@ void EthereumHost::sendTopicsMessage(p2p::NodeID nodeID, int type, int seq, std:
 		});
 	}
 
-	LOG(DEBUG) << "topics Send to:" << peerSended << " nodes";
+	LOG(TRACE) << "topics Send to:" << peerSended << " nodes";
 	if (peerSended == 0) {
-		LOG(ERROR) << "Send Fail, no available node";;
-		
+		LOG(WARNING) << "Send Fail, no available node";
 	}
 }
 
@@ -969,7 +985,7 @@ void EthereumHost::setTopics(std::shared_ptr<std::set<std::string> > topics) {
 	_topics = topics;
 	++_topicsSeq;
 
-	LOG(DEBUG) << "Update topic seq:" << _topicsSeq;
+	LOG(TRACE) << "Update topic seq:" << _topicsSeq;
 }
 
 void EthereumHost::getPeersHeight(std::map<h512, u256>& mp)

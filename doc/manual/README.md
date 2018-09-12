@@ -169,8 +169,7 @@ cd /mydata/FISCO-BCOS/cert/
 **注意：node.key 机构私钥文件请妥善保存**
 
 ### 2.4 生成SDK证书
-```
-shell
+``` shell
 cd /mydata/FISCO-BCOS/cert/
 ./sdk.sh WB sdk
 ```
@@ -1446,13 +1445,15 @@ FISCO BCOS区块链节点支持加密通信，在工具配置文件（cryptomod.
 
 节点配置文件config.json关键字段说明如下：
 
+**注意：rpcport 和 channelPort 仅限于被机构内的监控、运维、sdk等模块访问，切勿对外网开放。**
+
 | 配置项                | 说明                                       |
 | ------------------ | ---------------------------------------- |
 | sealEngine         | 共识算法（可选PBFT、RAFT、SinglePoint）            |
 | systemproxyaddress | 系统路由合约地址（生成方法可参看部署系统合约）                  |
 | listenip           | 节点监听IP                                   |
 | cryptomod          | 加密模式默认为0（与cryptomod.json文件中cryptomod字段保持一致） |
-| rpcport            | RPC监听端口）（若在同台机器上部署多个节点时，端口不能重复）          |
+| rpcport            | RPC监听端口（若在同台机器上部署多个节点时，端口不能重复）          |
 | p2pport            | P2P网络监听端口（若在同台机器上部署多个节点时，端口不能重复）         |
 | channelPort        | 链上链下监听端口（若在同台机器上部署多个节点时，端口不能重复）          |
 | wallet             | 钱包文件路径                                   |
